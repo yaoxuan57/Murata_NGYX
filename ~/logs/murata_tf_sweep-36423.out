@@ -1,0 +1,225 @@
+Job ID: 36423
+Host: 474Y574
+Start: Tue Apr  7 09:42:38 AM +08 2026
+Project dir: /home/users/astar/simt/ngyx/Murata_NGYX
+Output dir: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423
+Tue Apr  7 09:42:39 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 565.57.01              Driver Version: 565.57.01      CUDA Version: 12.7     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200                    On  |   00000000:CB:00.0 Off |                    0 |
+| N/A   39C    P0             81W /  700W |       1MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Using device: cuda
+Train+Val series length : 79041
+Test series length      : 5291
+train_mean: 3.527118
+train_std : 1.648645
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=36 ---
+Train samples: 66787 | Val samples: 11787 | Test samples: 4824
+Epoch 001 | train=0.023118 | val=0.029728 | lr=1.00e-03
+Epoch 002 | train=0.023096 | val=0.029609 | lr=1.00e-03
+Epoch 003 | train=0.023094 | val=0.029603 | lr=1.00e-03
+Epoch 004 | train=0.023091 | val=0.029609 | lr=1.00e-03
+Epoch 005 | train=0.023095 | val=0.029603 | lr=1.00e-03
+Epoch 006 | train=0.023095 | val=0.029604 | lr=1.00e-03
+Epoch 007 | train=0.023096 | val=0.029605 | lr=5.00e-04
+Epoch 008 | train=0.023087 | val=0.029602 | lr=5.00e-04
+Epoch 009 | train=0.023086 | val=0.029605 | lr=5.00e-04
+Epoch 010 | train=0.023087 | val=0.029600 | lr=5.00e-04
+Epoch 011 | train=0.023088 | val=0.029601 | lr=2.50e-04
+Epoch 012 | train=0.023083 | val=0.029601 | lr=2.50e-04
+Early stopping triggered at epoch 12.
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=72 ---
+Train samples: 66757 | Val samples: 11781 | Test samples: 4788
+Epoch 001 | train=0.030459 | val=0.038021 | lr=1.00e-03
+Epoch 002 | train=0.030442 | val=0.037993 | lr=1.00e-03
+Epoch 003 | train=0.030443 | val=0.038006 | lr=1.00e-03
+Epoch 004 | train=0.030441 | val=0.037983 | lr=1.00e-03
+Epoch 005 | train=0.030441 | val=0.038033 | lr=1.00e-03
+Epoch 006 | train=0.030442 | val=0.037988 | lr=1.00e-03
+Epoch 007 | train=0.030442 | val=0.037993 | lr=1.00e-03
+Epoch 008 | train=0.030440 | val=0.037984 | lr=5.00e-04
+Epoch 009 | train=0.030433 | val=0.037980 | lr=5.00e-04
+Epoch 010 | train=0.030434 | val=0.037983 | lr=5.00e-04
+Epoch 011 | train=0.030435 | val=0.037998 | lr=5.00e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=108 ---
+Train samples: 66726 | Val samples: 11776 | Test samples: 4752
+Epoch 001 | train=0.037518 | val=0.046056 | lr=1.00e-03
+Epoch 002 | train=0.037503 | val=0.046048 | lr=1.00e-03
+Epoch 003 | train=0.037500 | val=0.046037 | lr=1.00e-03
+Epoch 004 | train=0.037500 | val=0.046037 | lr=1.00e-03
+Epoch 005 | train=0.037500 | val=0.046037 | lr=1.00e-03
+Epoch 006 | train=0.037502 | val=0.046046 | lr=1.00e-03
+Epoch 007 | train=0.037500 | val=0.046063 | lr=5.00e-04
+Epoch 008 | train=0.037492 | val=0.046039 | lr=5.00e-04
+Epoch 009 | train=0.037493 | val=0.046056 | lr=5.00e-04
+Epoch 010 | train=0.037494 | val=0.046033 | lr=5.00e-04
+Epoch 011 | train=0.037494 | val=0.046036 | lr=2.50e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=864, PRED_LEN=36 ---
+Train samples: 66420 | Val samples: 11722 | Test samples: 4392
+Epoch 001 | train=0.023122 | val=0.029700 | lr=1.00e-03
+Epoch 002 | train=0.023108 | val=0.029701 | lr=1.00e-03
+Epoch 003 | train=0.023108 | val=0.029724 | lr=1.00e-03
+Epoch 004 | train=0.023108 | val=0.029749 | lr=1.00e-03
+Epoch 005 | train=0.023108 | val=0.029721 | lr=5.00e-04
+Epoch 006 | train=0.023100 | val=0.029711 | lr=5.00e-04
+Epoch 007 | train=0.023100 | val=0.029696 | lr=5.00e-04
+Epoch 008 | train=0.023100 | val=0.029698 | lr=5.00e-04
+Epoch 009 | train=0.023100 | val=0.029699 | lr=5.00e-04
+Epoch 010 | train=0.023101 | val=0.029703 | lr=5.00e-04
+Epoch 011 | train=0.023100 | val=0.029698 | lr=2.50e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=864, PRED_LEN=72 ---
+Train samples: 66390 | Val samples: 11716 | Test samples: 4356
+Epoch 001 | train=0.030479 | val=0.038140 | lr=1.00e-03
+Epoch 002 | train=0.030465 | val=0.038160 | lr=1.00e-03
+Epoch 003 | train=0.030465 | val=0.038144 | lr=1.00e-03
+Epoch 004 | train=0.030464 | val=0.038154 | lr=1.00e-03
+Epoch 005 | train=0.030466 | val=0.038137 | lr=5.00e-04
+Epoch 006 | train=0.030456 | val=0.038137 | lr=5.00e-04
+Epoch 007 | train=0.030457 | val=0.038135 | lr=5.00e-04
+Epoch 008 | train=0.030458 | val=0.038150 | lr=5.00e-04
+Epoch 009 | train=0.030457 | val=0.038135 | lr=5.00e-04
+Epoch 010 | train=0.030458 | val=0.038141 | lr=5.00e-04
+Epoch 011 | train=0.030456 | val=0.038134 | lr=2.50e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=864, PRED_LEN=108 ---
+Train samples: 66359 | Val samples: 11711 | Test samples: 4320
+Epoch 001 | train=0.037563 | val=0.046246 | lr=1.00e-03
+Epoch 002 | train=0.037543 | val=0.046252 | lr=1.00e-03
+Epoch 003 | train=0.037541 | val=0.046245 | lr=1.00e-03
+Epoch 004 | train=0.037545 | val=0.046238 | lr=1.00e-03
+Epoch 005 | train=0.037544 | val=0.046261 | lr=1.00e-03
+Epoch 006 | train=0.037545 | val=0.046247 | lr=1.00e-03
+Epoch 007 | train=0.037543 | val=0.046234 | lr=1.00e-03
+Epoch 008 | train=0.037543 | val=0.046239 | lr=5.00e-04
+Epoch 009 | train=0.037535 | val=0.046231 | lr=5.00e-04
+Epoch 010 | train=0.037534 | val=0.046235 | lr=5.00e-04
+Epoch 011 | train=0.037536 | val=0.046230 | lr=5.00e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=1728, PRED_LEN=36 ---
+Train samples: 65686 | Val samples: 11592 | Test samples: 3528
+Epoch 001 | train=0.022952 | val=0.029896 | lr=1.00e-03
+Epoch 002 | train=0.022933 | val=0.029903 | lr=1.00e-03
+Epoch 003 | train=0.022933 | val=0.029890 | lr=1.00e-03
+Epoch 004 | train=0.022933 | val=0.029887 | lr=1.00e-03
+Epoch 005 | train=0.022932 | val=0.029893 | lr=1.00e-03
+Epoch 006 | train=0.022933 | val=0.029895 | lr=1.00e-03
+Epoch 007 | train=0.022935 | val=0.029893 | lr=5.00e-04
+Epoch 008 | train=0.022924 | val=0.029884 | lr=5.00e-04
+Epoch 009 | train=0.022925 | val=0.029886 | lr=5.00e-04
+Epoch 010 | train=0.022925 | val=0.029894 | lr=5.00e-04
+Epoch 011 | train=0.022926 | val=0.029890 | lr=5.00e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=1728, PRED_LEN=72 ---
+Train samples: 65655 | Val samples: 11587 | Test samples: 3492
+Epoch 001 | train=0.030247 | val=0.038427 | lr=1.00e-03
+Epoch 002 | train=0.030230 | val=0.038406 | lr=1.00e-03
+Epoch 003 | train=0.030230 | val=0.038419 | lr=1.00e-03
+Epoch 004 | train=0.030230 | val=0.038432 | lr=1.00e-03
+Epoch 005 | train=0.030229 | val=0.038417 | lr=1.00e-03
+Epoch 006 | train=0.030228 | val=0.038412 | lr=5.00e-04
+Epoch 007 | train=0.030223 | val=0.038408 | lr=5.00e-04
+Epoch 008 | train=0.030223 | val=0.038405 | lr=5.00e-04
+Epoch 009 | train=0.030222 | val=0.038404 | lr=5.00e-04
+Epoch 010 | train=0.030222 | val=0.038408 | lr=2.50e-04
+Epoch 011 | train=0.030219 | val=0.038413 | lr=2.50e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=1728, PRED_LEN=108 ---
+Train samples: 65625 | Val samples: 11581 | Test samples: 3456
+Epoch 001 | train=0.037299 | val=0.046620 | lr=1.00e-03
+Epoch 002 | train=0.037279 | val=0.046611 | lr=1.00e-03
+Epoch 003 | train=0.037281 | val=0.046610 | lr=1.00e-03
+Epoch 004 | train=0.037281 | val=0.046611 | lr=1.00e-03
+Epoch 005 | train=0.037277 | val=0.046632 | lr=1.00e-03
+Epoch 006 | train=0.037281 | val=0.046638 | lr=5.00e-04
+Epoch 007 | train=0.037273 | val=0.046607 | lr=5.00e-04
+Epoch 008 | train=0.037272 | val=0.046602 | lr=5.00e-04
+Epoch 009 | train=0.037273 | val=0.046613 | lr=5.00e-04
+Epoch 010 | train=0.037272 | val=0.046603 | lr=5.00e-04
+Epoch 011 | train=0.037271 | val=0.046602 | lr=5.00e-04
+Early stopping triggered at epoch 11.
+\nExperiment summary:
+   input_len  pred_len  best_val_loss  ...  test_mae   test_r2  baseline_rmse
+0        432        36       0.029609  ...  0.795426  0.375068       1.376424
+1        864        36       0.029700  ...  0.803438  0.373577       1.415902
+2       1728        36       0.029896  ...  0.809111  0.348404       1.506642
+3        432        72       0.038021  ...  0.817642  0.329880       1.414511
+4        864        72       0.038140  ...  0.827984  0.327448       1.456787
+5       1728        72       0.038427  ...  0.838516  0.295759       1.554308
+6        432       108       0.046056  ...  0.836261  0.298409       1.436648
+7        864       108       0.046246  ...  0.848377  0.295565       1.480735
+8       1728       108       0.046620  ...  0.862994  0.259303       1.582460
+
+[9 rows x 7 columns]
+Saved summary to: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/experiment_summary.csv
+\nBest config -> INPUT_LEN=432, PRED_LEN=36, best_val_loss=0.029609, test_rmse=1.376331
+Saved best model to: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/transformer_delta_huber_date_split_best.pth
+\nBest-run metrics:
+Test MSE : 1.894287
+Test RMSE: 1.376331
+Test MAE : 0.795426
+Test R2  : 0.375068
+Baseline RMSE: 1.376424
+\nRMSE by horizon for best run:
+Horizon 01 RMSE: 1.064289
+Horizon 02 RMSE: 1.126865
+Horizon 03 RMSE: 1.174139
+Horizon 04 RMSE: 1.204987
+Horizon 05 RMSE: 1.249502
+Horizon 06 RMSE: 1.286394
+Horizon 07 RMSE: 1.320199
+Horizon 08 RMSE: 1.375685
+Horizon 09 RMSE: 1.364974
+Horizon 10 RMSE: 1.361648
+Horizon 11 RMSE: 1.356349
+Horizon 12 RMSE: 1.384628
+Horizon 13 RMSE: 1.416184
+Horizon 14 RMSE: 1.402957
+Horizon 15 RMSE: 1.408818
+Horizon 16 RMSE: 1.412303
+Horizon 17 RMSE: 1.409598
+Horizon 18 RMSE: 1.416132
+Horizon 19 RMSE: 1.425512
+Horizon 20 RMSE: 1.419328
+Horizon 21 RMSE: 1.427720
+Horizon 22 RMSE: 1.426708
+Horizon 23 RMSE: 1.429048
+Horizon 24 RMSE: 1.430833
+Horizon 25 RMSE: 1.420283
+Horizon 26 RMSE: 1.426571
+Horizon 27 RMSE: 1.424249
+Horizon 28 RMSE: 1.428450
+Horizon 29 RMSE: 1.427068
+Horizon 30 RMSE: 1.429692
+Horizon 31 RMSE: 1.430309
+Horizon 32 RMSE: 1.440161
+Horizon 33 RMSE: 1.430308
+Horizon 34 RMSE: 1.429656
+Horizon 35 RMSE: 1.430074
+Horizon 36 RMSE: 1.422523
+\nSaved artifacts:
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/experiment_summary.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/best_history.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/best_metrics.json
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/best_horizon_rmse.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/best_sample_forecast.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36423/transformer_delta_huber_date_split_best.pth
+End: Tue Apr  7 12:58:51 PM +08 2026
+Exit code: 0

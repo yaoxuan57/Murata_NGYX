@@ -1,0 +1,223 @@
+Job ID: 36537
+Host: DFS9B74
+Start: Tue Apr  7 01:21:28 PM +08 2026
+Project dir: /home/users/astar/simt/ngyx/Murata_NGYX
+Output dir: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/diffusion_sweep/36537
+Tue Apr  7 13:21:28 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 565.57.01              Driver Version: 565.57.01      CUDA Version: 12.7     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200                    On  |   00000000:3B:00.0 Off |                    0 |
+| N/A   44C    P0             80W /  700W |       1MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Using device: cuda
+Train+Val series length : 79041
+Test series length      : 5291
+train_mean: 3.527118
+train_std : 1.648645
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=36 ---
+Train samples: 66787 | Val samples: 11787 | Test samples: 4824
+Epoch 001 | train=0.285196 | val=0.232264 | lr=1.00e-03
+Epoch 002 | train=0.268794 | val=0.230263 | lr=1.00e-03
+Epoch 003 | train=0.289507 | val=0.218983 | lr=1.00e-03
+Epoch 004 | train=0.436885 | val=0.230874 | lr=1.00e-03
+Epoch 005 | train=1.312898 | val=0.213595 | lr=1.00e-03
+Epoch 006 | train=2.226649 | val=0.222500 | lr=1.00e-03
+Epoch 007 | train=10.814228 | val=0.217658 | lr=1.00e-03
+Epoch 008 | train=1.344464 | val=0.214133 | lr=1.00e-03
+Epoch 009 | train=19.287332 | val=0.259791 | lr=5.00e-04
+Epoch 010 | train=1.057344 | val=0.204912 | lr=5.00e-04
+Epoch 011 | train=0.746105 | val=0.201750 | lr=5.00e-04
+Epoch 012 | train=0.515130 | val=0.203199 | lr=5.00e-04
+Epoch 013 | train=1.745587 | val=0.202069 | lr=5.00e-04
+Epoch 014 | train=0.426636 | val=0.201380 | lr=5.00e-04
+Epoch 015 | train=11.780469 | val=0.202458 | lr=5.00e-04
+Epoch 016 | train=0.687793 | val=0.206984 | lr=5.00e-04
+Epoch 017 | train=0.485747 | val=0.198808 | lr=5.00e-04
+Epoch 018 | train=0.253386 | val=0.197456 | lr=5.00e-04
+Epoch 019 | train=0.339412 | val=0.202148 | lr=5.00e-04
+Epoch 020 | train=0.710745 | val=0.201251 | lr=5.00e-04
+Epoch 021 | train=0.313073 | val=0.198764 | lr=5.00e-04
+Epoch 022 | train=0.348604 | val=0.203691 | lr=2.50e-04
+Epoch 023 | train=0.246535 | val=0.195673 | lr=2.50e-04
+Epoch 024 | train=0.266164 | val=0.203837 | lr=2.50e-04
+Epoch 025 | train=0.225274 | val=0.197747 | lr=2.50e-04
+Epoch 026 | train=0.455413 | val=0.196009 | lr=2.50e-04
+Epoch 027 | train=0.385764 | val=0.351811 | lr=1.25e-04
+Epoch 028 | train=0.236394 | val=0.197913 | lr=1.25e-04
+Epoch 029 | train=0.194341 | val=0.239253 | lr=1.25e-04
+Epoch 030 | train=0.330010 | val=0.205500 | lr=1.25e-04
+Epoch 031 | train=0.198637 | val=0.205050 | lr=6.25e-05
+Epoch 032 | train=0.251562 | val=0.925615 | lr=6.25e-05
+Epoch 033 | train=0.248862 | val=0.200748 | lr=6.25e-05
+Early stopping triggered at epoch 33.
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=72 ---
+Train samples: 66757 | Val samples: 11781 | Test samples: 4788
+Epoch 001 | train=0.295173 | val=0.236759 | lr=1.00e-03
+Epoch 002 | train=0.259899 | val=0.229709 | lr=1.00e-03
+Epoch 003 | train=0.254185 | val=0.234040 | lr=1.00e-03
+Epoch 004 | train=0.253294 | val=0.237387 | lr=1.00e-03
+Epoch 005 | train=0.248942 | val=0.230499 | lr=1.00e-03
+Epoch 006 | train=nan | val=nan | lr=5.00e-04
+Epoch 007 | train=nan | val=nan | lr=5.00e-04
+Epoch 008 | train=nan | val=nan | lr=5.00e-04
+Epoch 009 | train=nan | val=nan | lr=5.00e-04
+Epoch 010 | train=nan | val=nan | lr=2.50e-04
+Epoch 011 | train=nan | val=nan | lr=2.50e-04
+Epoch 012 | train=nan | val=nan | lr=2.50e-04
+Early stopping triggered at epoch 12.
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=108 ---
+Train samples: 66726 | Val samples: 11776 | Test samples: 4752
+Epoch 001 | train=0.315077 | val=0.253073 | lr=1.00e-03
+Epoch 002 | train=0.266722 | val=0.241593 | lr=1.00e-03
+Epoch 003 | train=0.262323 | val=0.242416 | lr=1.00e-03
+Epoch 004 | train=0.260152 | val=0.238789 | lr=1.00e-03
+Epoch 005 | train=0.255024 | val=0.243960 | lr=1.00e-03
+Epoch 006 | train=0.256785 | val=0.233478 | lr=1.00e-03
+Epoch 007 | train=0.252909 | val=0.232402 | lr=1.00e-03
+Epoch 008 | train=0.252369 | val=0.234506 | lr=1.00e-03
+Epoch 009 | train=0.250080 | val=0.239671 | lr=1.00e-03
+Epoch 010 | train=0.251764 | val=0.234952 | lr=1.00e-03
+Epoch 011 | train=0.254038 | val=0.242052 | lr=5.00e-04
+Epoch 012 | train=0.223710 | val=0.215028 | lr=5.00e-04
+Epoch 013 | train=0.218275 | val=0.216098 | lr=5.00e-04
+Epoch 014 | train=0.218945 | val=0.215645 | lr=5.00e-04
+Epoch 015 | train=0.215705 | val=0.214513 | lr=5.00e-04
+Epoch 016 | train=0.217241 | val=0.210387 | lr=5.00e-04
+Epoch 017 | train=0.231287 | val=0.216174 | lr=5.00e-04
+Epoch 018 | train=0.214879 | val=0.209225 | lr=5.00e-04
+Epoch 019 | train=0.216631 | val=0.217037 | lr=5.00e-04
+Epoch 020 | train=0.218865 | val=0.216377 | lr=5.00e-04
+Epoch 021 | train=0.218028 | val=0.214757 | lr=5.00e-04
+Epoch 022 | train=0.212727 | val=0.215712 | lr=2.50e-04
+Epoch 023 | train=0.203516 | val=0.207305 | lr=2.50e-04
+Epoch 024 | train=0.201345 | val=0.208829 | lr=2.50e-04
+Epoch 025 | train=0.202802 | val=0.206021 | lr=2.50e-04
+Epoch 026 | train=0.203971 | val=0.209496 | lr=2.50e-04
+Epoch 027 | train=0.200626 | val=0.211264 | lr=2.50e-04
+Epoch 028 | train=0.199240 | val=0.211231 | lr=2.50e-04
+Epoch 029 | train=0.199132 | val=0.213190 | lr=1.25e-04
+Epoch 030 | train=0.196178 | val=0.209363 | lr=1.25e-04
+Epoch 031 | train=0.193071 | val=0.206469 | lr=1.25e-04
+Epoch 032 | train=0.194699 | val=0.202555 | lr=1.25e-04
+Epoch 033 | train=0.192775 | val=0.207325 | lr=1.25e-04
+Epoch 034 | train=0.194458 | val=0.207483 | lr=1.25e-04
+Epoch 035 | train=0.196063 | val=0.209124 | lr=1.25e-04
+Epoch 036 | train=0.196304 | val=0.206464 | lr=6.25e-05
+Epoch 037 | train=0.190170 | val=0.201579 | lr=6.25e-05
+Epoch 038 | train=0.189062 | val=0.202157 | lr=6.25e-05
+Epoch 039 | train=0.192739 | val=0.208465 | lr=6.25e-05
+Epoch 040 | train=0.191400 | val=0.207984 | lr=6.25e-05
+Epoch 041 | train=0.189260 | val=0.204764 | lr=3.13e-05
+Epoch 042 | train=0.192907 | val=0.206303 | lr=3.13e-05
+Epoch 043 | train=0.186435 | val=0.207559 | lr=3.13e-05
+Epoch 044 | train=0.189539 | val=0.205811 | lr=3.13e-05
+Epoch 045 | train=0.192095 | val=0.206355 | lr=1.56e-05
+Epoch 046 | train=0.189378 | val=0.207215 | lr=1.56e-05
+Epoch 047 | train=0.187331 | val=0.205704 | lr=1.56e-05
+Early stopping triggered at epoch 47.
+\n--- Training experiment: INPUT_LEN=864, PRED_LEN=36 ---
+Train samples: 66420 | Val samples: 11722 | Test samples: 4392
+Epoch 001 | train=0.268547 | val=0.227502 | lr=1.00e-03
+Epoch 002 | train=nan | val=nan | lr=1.00e-03
+Epoch 003 | train=nan | val=nan | lr=1.00e-03
+Epoch 004 | train=nan | val=nan | lr=1.00e-03
+Epoch 005 | train=nan | val=nan | lr=5.00e-04
+Epoch 006 | train=nan | val=nan | lr=5.00e-04
+Epoch 007 | train=nan | val=nan | lr=5.00e-04
+Epoch 008 | train=nan | val=nan | lr=5.00e-04
+Epoch 009 | train=nan | val=nan | lr=2.50e-04
+Epoch 010 | train=nan | val=nan | lr=2.50e-04
+Epoch 011 | train=nan | val=nan | lr=2.50e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=864, PRED_LEN=72 ---
+Train samples: 66390 | Val samples: 11716 | Test samples: 4356
+Epoch 001 | train=0.302421 | val=0.242493 | lr=1.00e-03
+Epoch 002 | train=0.260945 | val=0.235206 | lr=1.00e-03
+Epoch 003 | train=0.253566 | val=0.232338 | lr=1.00e-03
+Epoch 004 | train=0.252610 | val=0.230018 | lr=1.00e-03
+Epoch 005 | train=0.251919 | val=0.231365 | lr=1.00e-03
+Epoch 006 | train=0.250456 | val=0.230247 | lr=1.00e-03
+Epoch 007 | train=0.254018 | val=0.226613 | lr=1.00e-03
+Epoch 008 | train=0.266155 | val=0.227275 | lr=1.00e-03
+Epoch 009 | train=1.877294 | val=0.227531 | lr=1.00e-03
+Epoch 010 | train=0.259252 | val=0.246550 | lr=1.00e-03
+Epoch 011 | train=0.338766 | val=0.724168 | lr=5.00e-04
+Epoch 012 | train=5.066427 | val=0.212031 | lr=5.00e-04
+Epoch 013 | train=0.235874 | val=0.207261 | lr=5.00e-04
+Epoch 014 | train=0.853836 | val=0.213064 | lr=5.00e-04
+Epoch 015 | train=1.907130 | val=0.217744 | lr=5.00e-04
+Epoch 016 | train=13.160460 | val=0.223354 | lr=5.00e-04
+Epoch 017 | train=0.928170 | val=0.212282 | lr=2.50e-04
+Epoch 018 | train=0.394638 | val=0.198343 | lr=2.50e-04
+Epoch 019 | train=0.248970 | val=0.209116 | lr=2.50e-04
+Epoch 020 | train=0.421743 | val=0.202037 | lr=2.50e-04
+Epoch 021 | train=0.217226 | val=0.205039 | lr=2.50e-04
+Epoch 022 | train=0.256579 | val=0.203652 | lr=1.25e-04
+Epoch 023 | train=0.230356 | val=0.201495 | lr=1.25e-04
+Epoch 024 | train=0.222191 | val=0.214195 | lr=1.25e-04
+Epoch 025 | train=0.392464 | val=0.202726 | lr=1.25e-04
+Epoch 026 | train=0.215088 | val=0.196792 | lr=1.25e-04
+Epoch 027 | train=2.582444 | val=0.200338 | lr=1.25e-04
+Epoch 028 | train=0.224227 | val=0.202079 | lr=1.25e-04
+Epoch 029 | train=0.480680 | val=0.205169 | lr=1.25e-04
+Epoch 030 | train=0.223719 | val=0.209568 | lr=6.25e-05
+Epoch 031 | train=0.221939 | val=0.200339 | lr=6.25e-05
+Epoch 032 | train=0.244290 | val=0.200875 | lr=6.25e-05
+Epoch 033 | train=0.212572 | val=0.306554 | lr=6.25e-05
+Epoch 034 | train=0.224676 | val=0.205410 | lr=3.13e-05
+Epoch 035 | train=0.237869 | val=0.207349 | lr=3.13e-05
+Epoch 036 | train=0.210908 | val=0.205281 | lr=3.13e-05
+Early stopping triggered at epoch 36.
+\n--- Training experiment: INPUT_LEN=864, PRED_LEN=108 ---
+Train samples: 66359 | Val samples: 11711 | Test samples: 4320
+Epoch 001 | train=0.314542 | val=0.249768 | lr=1.00e-03
+Epoch 002 | train=nan | val=nan | lr=1.00e-03
+Epoch 003 | train=nan | val=nan | lr=1.00e-03
+Epoch 004 | train=nan | val=nan | lr=1.00e-03
+Epoch 005 | train=nan | val=nan | lr=5.00e-04
+Epoch 006 | train=nan | val=nan | lr=5.00e-04
+Epoch 007 | train=nan | val=nan | lr=5.00e-04
+Epoch 008 | train=nan | val=nan | lr=5.00e-04
+Epoch 009 | train=nan | val=nan | lr=2.50e-04
+Epoch 010 | train=nan | val=nan | lr=2.50e-04
+Epoch 011 | train=nan | val=nan | lr=2.50e-04
+Early stopping triggered at epoch 11.
+\n--- Training experiment: INPUT_LEN=1728, PRED_LEN=36 ---
+Train samples: 65686 | Val samples: 11592 | Test samples: 3528
+Epoch 001 | train=0.275022 | val=0.234645 | lr=1.00e-03
+Epoch 002 | train=0.275903 | val=0.230569 | lr=1.00e-03
+Epoch 003 | train=0.286266 | val=0.226477 | lr=1.00e-03
+Epoch 004 | train=2.551635 | val=0.222192 | lr=1.00e-03
+Epoch 005 | train=nan | val=nan | lr=1.00e-03
+Epoch 006 | train=nan | val=nan | lr=1.00e-03
+Epoch 007 | train=nan | val=nan | lr=1.00e-03
+Epoch 008 | train=nan | val=nan | lr=5.00e-04
+Epoch 009 | train=nan | val=nan | lr=5.00e-04
+Epoch 010 | train=nan | val=nan | lr=5.00e-04
+Epoch 011 | train=nan | val=nan | lr=5.00e-04
+Epoch 012 | train=nan | val=nan | lr=2.50e-04
+Epoch 013 | train=nan | val=nan | lr=2.50e-04
+Epoch 014 | train=nan | val=nan | lr=2.50e-04
+Early stopping triggered at epoch 14.
+\n--- Training experiment: INPUT_LEN=1728, PRED_LEN=72 ---
+Train samples: 65655 | Val samples: 11587 | Test samples: 3492
+Epoch 001 | train=0.298061 | val=0.247621 | lr=1.00e-03
+Epoch 002 | train=0.262791 | val=0.234176 | lr=1.00e-03
+Epoch 003 | train=0.254312 | val=0.233404 | lr=1.00e-03
+Epoch 004 | train=0.253577 | val=0.231215 | lr=1.00e-03
+Epoch 005 | train=0.251068 | val=0.234198 | lr=1.00e-03
+Epoch 006 | train=0.247752 | val=0.229589 | lr=1.00e-03

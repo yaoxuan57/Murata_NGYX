@@ -1,0 +1,2 @@
+/home/users/astar/simt/ngyx/Murata_NGYX/train_transformer_sweep.py:399: UserWarning: Parsing dates in %d/%m/%Y %H:%M format when dayfirst=False (the default) was specified. Pass `dayfirst=True` or specify a format to silence this warning.
+  df_test["TIMESTAMP"] = pd.to_datetime(df_test["TIMESTAMP"])

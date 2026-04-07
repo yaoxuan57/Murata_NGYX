@@ -1,0 +1,32 @@
+Job ID: 36550
+Host: 474Y574
+Start: Tue Apr  7 03:16:29 PM +08 2026
+Project dir: /home/users/astar/simt/ngyx/Murata_NGYX
+Output dir: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/mambaformer_sweep/36550
+Tue Apr  7 15:16:29 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 565.57.01              Driver Version: 565.57.01      CUDA Version: 12.7     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200                    On  |   00000000:BB:00.0 Off |                    0 |
+| N/A   40C    P0             80W /  700W |       1MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Using device: cuda
+Train+Val series length : 79041
+Test series length      : 5291
+train_mean: 3.527118
+train_std : 1.648645
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=36 ---
+Train samples: 66787 | Val samples: 11787 | Test samples: 4824

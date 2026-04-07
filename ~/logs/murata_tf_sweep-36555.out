@@ -1,0 +1,104 @@
+Job ID: 36555
+Host: DFS9B74
+Start: Tue Apr  7 03:37:30 PM +08 2026
+Project dir: /home/users/astar/simt/ngyx/Murata_NGYX
+Output dir: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555
+Tue Apr  7 15:37:30 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 565.57.01              Driver Version: 565.57.01      CUDA Version: 12.7     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200                    On  |   00000000:BB:00.0 Off |                    0 |
+| N/A   41C    P0             79W /  700W |       1MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+Using device: cuda
+Train+Val series length : 79041
+Test series length      : 5291
+train_mean: 3.527118
+train_std : 1.648645
+\n--- Training experiment: INPUT_LEN=432, PRED_LEN=36 ---
+Train samples: 66787 | Val samples: 11787 | Test samples: 4824
+Epoch 001 | train=0.023119 | val=0.029602 | lr=1.00e-03
+Epoch 002 | train=0.023096 | val=0.029609 | lr=1.00e-03
+Epoch 003 | train=0.023094 | val=0.029603 | lr=1.00e-03
+Epoch 004 | train=0.023091 | val=0.029609 | lr=1.00e-03
+Epoch 005 | train=0.023095 | val=0.029603 | lr=5.00e-04
+Epoch 006 | train=0.023087 | val=0.029599 | lr=5.00e-04
+Epoch 007 | train=0.023088 | val=0.029602 | lr=5.00e-04
+Epoch 008 | train=0.023087 | val=0.029602 | lr=5.00e-04
+Epoch 009 | train=0.023086 | val=0.029605 | lr=2.50e-04
+Epoch 010 | train=0.023083 | val=0.029598 | lr=2.50e-04
+Epoch 011 | train=0.023084 | val=0.029599 | lr=2.50e-04
+Early stopping triggered at epoch 11.
+\nExperiment summary:
+   input_len  pred_len  best_val_loss  ...  test_mae   test_r2  baseline_rmse
+0        432        36       0.029602  ...  0.795522  0.374968       1.376424
+
+[1 rows x 7 columns]
+Saved summary to: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/experiment_summary.csv
+\nBest config -> INPUT_LEN=432, PRED_LEN=36, best_val_loss=0.029602, test_rmse=1.376441
+Saved best model to: /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/transformer_delta_huber_date_split_best.pth
+\nBest-run metrics:
+Test MSE : 1.894590
+Test RMSE: 1.376441
+Test MAE : 0.795522
+Test R2  : 0.374968
+Baseline RMSE: 1.376424
+\nRMSE by horizon for best run:
+Horizon 01 RMSE: 1.064280
+Horizon 02 RMSE: 1.126868
+Horizon 03 RMSE: 1.174162
+Horizon 04 RMSE: 1.204913
+Horizon 05 RMSE: 1.249501
+Horizon 06 RMSE: 1.286431
+Horizon 07 RMSE: 1.320246
+Horizon 08 RMSE: 1.375709
+Horizon 09 RMSE: 1.364952
+Horizon 10 RMSE: 1.361708
+Horizon 11 RMSE: 1.356344
+Horizon 12 RMSE: 1.384638
+Horizon 13 RMSE: 1.416182
+Horizon 14 RMSE: 1.402998
+Horizon 15 RMSE: 1.408896
+Horizon 16 RMSE: 1.412339
+Horizon 17 RMSE: 1.409731
+Horizon 18 RMSE: 1.416266
+Horizon 19 RMSE: 1.425708
+Horizon 20 RMSE: 1.419346
+Horizon 21 RMSE: 1.428006
+Horizon 22 RMSE: 1.426864
+Horizon 23 RMSE: 1.429245
+Horizon 24 RMSE: 1.430937
+Horizon 25 RMSE: 1.420292
+Horizon 26 RMSE: 1.426685
+Horizon 27 RMSE: 1.424276
+Horizon 28 RMSE: 1.428522
+Horizon 29 RMSE: 1.427150
+Horizon 30 RMSE: 1.429988
+Horizon 31 RMSE: 1.430790
+Horizon 32 RMSE: 1.440331
+Horizon 33 RMSE: 1.430771
+Horizon 34 RMSE: 1.429874
+Horizon 35 RMSE: 1.430062
+Horizon 36 RMSE: 1.422953
+\nSaved artifacts:
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/experiment_summary.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/best_history.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/best_metrics.json
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/best_horizon_rmse.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/best_sample_forecast.csv
+- /home/users/astar/simt/ngyx/Murata_NGYX/outputs/transformer_sweep/36555/transformer_delta_huber_date_split_best.pth
+End: Tue Apr  7 03:46:33 PM +08 2026
+Exit code: 0
