@@ -278,6 +278,54 @@ def build_horizon_forecast_dataframe(timestamps, actual, predicted, horizon):
     )
 
 
+def save_rolling_window_forecasts(output_dir, preds_raw, targets_raw, timestamps, input_len, pred_len):
+    windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
+    plots_dir = os.path.join(windows_dir, "plots")
+    csv_dir = os.path.join(windows_dir, "csv")
+    os.makedirs(plots_dir, exist_ok=True)
+    os.makedirs(csv_dir, exist_ok=True)
+
+    all_rows = []
+    n_windows = preds_raw.shape[0]
+
+    for window_idx in range(n_windows):
+        start_idx = input_len + window_idx
+        ts_window = timestamps.iloc[start_idx : start_idx + pred_len]
+
+        window_df = pd.DataFrame(
+            {
+                "window_index": [window_idx] * pred_len,
+                "step_ahead": np.arange(1, pred_len + 1),
+                "timestamp": ts_window.astype(str).to_list(),
+                "actual": targets_raw[window_idx],
+                "predicted": preds_raw[window_idx],
+            }
+        )
+
+        window_csv_path = os.path.join(csv_dir, f"window_{window_idx:06d}.csv")
+        window_df.to_csv(window_csv_path, index=False)
+        all_rows.append(window_df)
+
+        plt.figure(figsize=(8, 3))
+        plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
+        plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
+        plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
+        plt.xlabel("Step Ahead")
+        plt.ylabel("Acceleration RMS")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
+        plt.savefig(window_plot_path, dpi=140)
+        plt.close()
+
+    combined_df = pd.concat(all_rows, ignore_index=True)
+    combined_csv_path = os.path.join(windows_dir, "all_windows_forecasts.csv")
+    combined_df.to_csv(combined_csv_path, index=False)
+
+    return windows_dir, combined_csv_path
+
+
 def train_one_experiment(
     input_len,
     pred_len,
@@ -598,6 +646,15 @@ def main():
         horizon=h + 1,
     ).to_csv(horizon_n_path, index=False)
 
+    rolling_windows_dir, rolling_combined_csv_path = save_rolling_window_forecasts(
+        output_dir=args.output_dir,
+        preds_raw=best_result["all_preds_raw"],
+        targets_raw=best_result["all_targets_raw"],
+        timestamps=df_test["TIMESTAMP"],
+        input_len=best_input_len,
+        pred_len=best_pred_len,
+    )
+
     save_plot(
         path=os.path.join(args.output_dir, f"best_horizon_{h + 1}.png"),
         title=f"Horizon-{h + 1} Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
@@ -629,6 +686,8 @@ def main():
     print(f"- {horizon_path}")
     print(f"- {horizon_1_path}")
     print(f"- {horizon_n_path}")
+    print(f"- {rolling_windows_dir}")
+    print(f"- {rolling_combined_csv_path}")
     print(f"- {sample_path}")
     print(f"- {checkpoint_path}")
 
