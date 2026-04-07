@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=murata_tf_sweep
+#SBATCH --account=prj0000000262
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
