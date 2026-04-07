@@ -267,6 +267,17 @@ def save_plot(path, title, x_label, y_label, x, y1, y1_label, y2=None, y2_label=
     plt.close()
 
 
+def build_horizon_forecast_dataframe(timestamps, actual, predicted, horizon):
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps.astype(str).to_list(),
+            "horizon": [horizon] * len(actual),
+            "actual": actual,
+            "predicted": predicted,
+        }
+    )
+
+
 def train_one_experiment(
     input_len,
     pred_len,
@@ -552,6 +563,15 @@ def main():
     h_pred = best_result["all_preds_raw"][:, h]
     h_true = best_result["all_targets_raw"][:, h]
     ts_h1 = df_test["TIMESTAMP"].iloc[best_input_len + h: best_input_len + h + len(h_pred)]
+
+    horizon_1_path = os.path.join(args.output_dir, "best_horizon_1_forecast.csv")
+    build_horizon_forecast_dataframe(
+        timestamps=ts_h1,
+        actual=h_true,
+        predicted=h_pred,
+        horizon=1,
+    ).to_csv(horizon_1_path, index=False)
+
     save_plot(
         path=os.path.join(args.output_dir, "best_horizon_1.png"),
         title=f"Horizon-1 Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
@@ -569,6 +589,15 @@ def main():
     h_pred = best_result["all_preds_raw"][:, h]
     h_true = best_result["all_targets_raw"][:, h]
     ts_hn = df_test["TIMESTAMP"].iloc[best_input_len + h: best_input_len + h + len(h_pred)]
+
+    horizon_n_path = os.path.join(args.output_dir, f"best_horizon_{h + 1}_forecast.csv")
+    build_horizon_forecast_dataframe(
+        timestamps=ts_hn,
+        actual=h_true,
+        predicted=h_pred,
+        horizon=h + 1,
+    ).to_csv(horizon_n_path, index=False)
+
     save_plot(
         path=os.path.join(args.output_dir, f"best_horizon_{h + 1}.png"),
         title=f"Horizon-{h + 1} Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
@@ -598,6 +627,8 @@ def main():
     print(f"- {history_path}")
     print(f"- {metrics_path}")
     print(f"- {horizon_path}")
+    print(f"- {horizon_1_path}")
+    print(f"- {horizon_n_path}")
     print(f"- {sample_path}")
     print(f"- {checkpoint_path}")
 
