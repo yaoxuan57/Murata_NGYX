@@ -354,6 +354,26 @@ def save_plot(path, title, x_label, y_label, x, y1, y1_label, y2=None, y2_label=
     plt.close()
 
 
+def build_forecast_dataframe(preds_raw, targets_raw, timestamps, input_len):
+    rows = []
+    num_samples, pred_len = preds_raw.shape
+
+    for sample_idx in range(num_samples):
+        for horizon_idx in range(pred_len):
+            ts_idx = input_len + sample_idx + horizon_idx
+            rows.append(
+                {
+                    "sample_index": sample_idx,
+                    "horizon": horizon_idx + 1,
+                    "timestamp": timestamps.iloc[ts_idx],
+                    "actual": targets_raw[sample_idx, horizon_idx],
+                    "predicted": preds_raw[sample_idx, horizon_idx],
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
 def train_one_experiment(
     input_len,
     pred_len,
@@ -615,6 +635,19 @@ def main():
         }
     ).to_csv(horizon_path, index=False)
 
+    test_predictions_path = os.path.join(args.output_dir, "best_test_predictions.npy")
+    test_targets_path = os.path.join(args.output_dir, "best_test_targets.npy")
+    np.save(test_predictions_path, best_result["all_preds_raw"])
+    np.save(test_targets_path, best_result["all_targets_raw"])
+
+    forecast_table_path = os.path.join(args.output_dir, "best_test_forecasts.csv")
+    build_forecast_dataframe(
+        preds_raw=best_result["all_preds_raw"],
+        targets_raw=best_result["all_targets_raw"],
+        timestamps=df_test["TIMESTAMP"],
+        input_len=best_input_len,
+    ).to_csv(forecast_table_path, index=False)
+
     sample_path = os.path.join(args.output_dir, "best_sample_forecast.csv")
     pd.DataFrame(
         {
@@ -699,6 +732,9 @@ def main():
     print(f"- {history_path}")
     print(f"- {metrics_path}")
     print(f"- {horizon_path}")
+    print(f"- {test_predictions_path}")
+    print(f"- {test_targets_path}")
+    print(f"- {forecast_table_path}")
     print(f"- {sample_path}")
     print(f"- {checkpoint_path}")
 
