@@ -2,3 +2,5 @@
 *.png
 *.pptx
 ~$*.pptx
+*.pth
+*.json

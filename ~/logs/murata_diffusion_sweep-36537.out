@@ -221,3 +221,4 @@ Epoch 003 | train=0.254312 | val=0.233404 | lr=1.00e-03
 Epoch 004 | train=0.253577 | val=0.231215 | lr=1.00e-03
 Epoch 005 | train=0.251068 | val=0.234198 | lr=1.00e-03
 Epoch 006 | train=0.247752 | val=0.229589 | lr=1.00e-03
+Epoch 007 | train=0.249563 | val=0.227529 | lr=1.00e-03
