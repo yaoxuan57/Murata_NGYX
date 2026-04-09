@@ -33,6 +33,14 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument("--min-delta", type=float, default=1e-4)
     parser.add_argument("--plot-sample-idx", type=int, default=200)
     parser.add_argument("--checkpoint-name", type=str, default=default_checkpoint_name)
+    parser.add_argument("--loss-huber-delta", type=float, default=1.0)
+    parser.add_argument("--loss-point-weight", type=float, default=0.4)
+    parser.add_argument("--loss-diff-weight", type=float, default=1.2)
+    parser.add_argument("--loss-curvature-weight", type=float, default=0.8)
+    parser.add_argument("--loss-variance-weight", type=float, default=0.4)
+    parser.add_argument("--save-window-plots", dest="save_window_plots", action="store_true")
+    parser.add_argument("--no-window-plots", dest="save_window_plots", action="store_false")
+    parser.set_defaults(save_window_plots=True)
     return parser
 
 
@@ -314,7 +322,15 @@ def build_horizon_forecast_dataframe(timestamps, actual, predicted, horizon):
     )
 
 
-def save_rolling_window_forecasts(output_dir, preds_raw, targets_raw, timestamps, input_len, pred_len):
+def save_rolling_window_forecasts(
+    output_dir,
+    preds_raw,
+    targets_raw,
+    timestamps,
+    input_len,
+    pred_len,
+    save_plots=True,
+):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
     csv_dir = os.path.join(windows_dir, "csv")
@@ -342,18 +358,19 @@ def save_rolling_window_forecasts(output_dir, preds_raw, targets_raw, timestamps
         window_df.to_csv(window_csv_path, index=False)
         all_rows.append(window_df)
 
-        plt.figure(figsize=(8, 3))
-        plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
-        plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
-        plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
-        plt.xlabel("Step Ahead")
-        plt.ylabel("Acceleration RMS")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
-        plt.savefig(window_plot_path, dpi=140)
-        plt.close()
+        if save_plots:
+            plt.figure(figsize=(8, 3))
+            plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
+            plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
+            plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
+            plt.xlabel("Step Ahead")
+            plt.ylabel("Acceleration RMS")
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
+            plt.savefig(window_plot_path, dpi=140)
+            plt.close()
 
     combined_df = pd.concat(all_rows, ignore_index=True)
     combined_csv_path = os.path.join(windows_dir, "all_windows_forecasts.csv")
@@ -414,7 +431,14 @@ def run_sweep(
                 test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
                 model = model_factory(input_len, pred_len, args, device)
-                criterion = TrajectoryAwareLoss(pred_len=pred_len, delta=1.0).to(device)
+                criterion = TrajectoryAwareLoss(
+                    pred_len=pred_len,
+                    delta=args.loss_huber_delta,
+                    point_weight=args.loss_point_weight,
+                    diff_weight=args.loss_diff_weight,
+                    curvature_weight=args.loss_curvature_weight,
+                    variance_weight=args.loss_variance_weight,
+                ).to(device)
                 optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
                 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer,
@@ -574,6 +598,38 @@ def run_sweep(
     with open(metrics_path, "w", encoding="utf-8") as fp:
         json.dump(metrics_payload, fp, indent=2)
 
+    best_config_path = os.path.join(args.output_dir, "best_config.json")
+    best_config_payload = {
+        "train_val_csv": args.train_val_csv,
+        "test_csv": args.test_csv,
+        "output_dir": args.output_dir,
+        "seed": args.seed,
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "val_ratio": args.val_ratio,
+        "early_stopping_patience": args.early_stopping_patience,
+        "scheduler_patience": args.scheduler_patience,
+        "scheduler_factor": args.scheduler_factor,
+        "min_delta": args.min_delta,
+        "loss_huber_delta": args.loss_huber_delta,
+        "loss_point_weight": args.loss_point_weight,
+        "loss_diff_weight": args.loss_diff_weight,
+        "loss_curvature_weight": args.loss_curvature_weight,
+        "loss_variance_weight": args.loss_variance_weight,
+        "save_window_plots": args.save_window_plots,
+        "best_input_len": int(best_input_len),
+        "best_pred_len": int(best_pred_len),
+        "model_config": model_config_factory(args, best_input_len, best_pred_len),
+        "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
+        "test_rmse": float(best_result["metrics"]["rmse"]),
+        "test_mae": float(best_result["metrics"]["mae"]),
+        "test_r2": float(best_result["metrics"]["r2"]),
+    }
+    with open(best_config_path, "w", encoding="utf-8") as fp:
+        json.dump(best_config_payload, fp, indent=2)
+
     horizon_path = os.path.join(args.output_dir, "best_horizon_rmse.csv")
     pd.DataFrame(
         {
@@ -662,6 +718,7 @@ def run_sweep(
         timestamps=df_test["TIMESTAMP"],
         input_len=best_input_len,
         pred_len=best_pred_len,
+        save_plots=args.save_window_plots,
     )
 
     save_plot(
@@ -692,6 +749,7 @@ def run_sweep(
     print(f"- {summary_path}")
     print(f"- {history_path}")
     print(f"- {metrics_path}")
+    print(f"- {best_config_path}")
     print(f"- {horizon_path}")
     print(f"- {horizon_1_path}")
     print(f"- {horizon_n_path}")
