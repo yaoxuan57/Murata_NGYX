@@ -157,12 +157,21 @@ class TransformerForecastDelta(nn.Module):
 
 
 class TrajectoryAwareLoss(nn.Module):
-    def __init__(self, pred_len, delta=1.0, point_weight=1.0, diff_weight=0.35, curvature_weight=0.1):
+    def __init__(
+        self,
+        pred_len,
+        delta=1.0,
+        point_weight=0.4,
+        diff_weight=1.2,
+        curvature_weight=0.8,
+        variance_weight=0.4,
+    ):
         super().__init__()
         self.delta = delta
         self.point_weight = point_weight
         self.diff_weight = diff_weight
         self.curvature_weight = curvature_weight
+        self.variance_weight = variance_weight
         w = torch.linspace(1.0, 0.8, pred_len, dtype=torch.float32)
         self.register_buffer("w", w / w.mean())
 
@@ -190,10 +199,15 @@ class TrajectoryAwareLoss(nn.Module):
         curvature_weights = point_weights[2:]
         curvature_loss = self._weighted_huber(pred_curvature, target_curvature, curvature_weights)
 
+        pred_std = pred.std(dim=1, unbiased=False)
+        target_std = target.std(dim=1, unbiased=False)
+        variance_loss = torch.mean(torch.abs(pred_std - target_std))
+
         return (
             self.point_weight * point_loss
             + self.diff_weight * diff_loss
             + self.curvature_weight * curvature_loss
+            + self.variance_weight * variance_loss
         )
 
 
