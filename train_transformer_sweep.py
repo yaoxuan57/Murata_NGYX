@@ -156,15 +156,17 @@ class TransformerForecastDelta(nn.Module):
         return self.head(x)
 
 
-class WeightedHuberLoss(nn.Module):
-    def __init__(self, pred_len, delta=1.0):
+class TrajectoryAwareLoss(nn.Module):
+    def __init__(self, pred_len, delta=1.0, point_weight=1.0, diff_weight=0.35, curvature_weight=0.1):
         super().__init__()
         self.delta = delta
-        w = torch.linspace(1.0, 0.3, pred_len, dtype=torch.float32)
+        self.point_weight = point_weight
+        self.diff_weight = diff_weight
+        self.curvature_weight = curvature_weight
+        w = torch.linspace(1.0, 0.8, pred_len, dtype=torch.float32)
         self.register_buffer("w", w / w.mean())
 
-    def forward(self, pred, target):
-        w = self.w.to(pred.device)
+    def _weighted_huber(self, pred, target, weights):
         err = pred - target
         abs_err = err.abs()
         huber = torch.where(
@@ -172,7 +174,27 @@ class WeightedHuberLoss(nn.Module):
             0.5 * err ** 2,
             self.delta * (abs_err - 0.5 * self.delta),
         )
-        return (huber * w).mean()
+        return (huber * weights).mean()
+
+    def forward(self, pred, target):
+        point_weights = self.w.to(pred.device)
+        point_loss = self._weighted_huber(pred, target, point_weights)
+
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        diff_weights = point_weights[1:]
+        diff_loss = self._weighted_huber(pred_diff, target_diff, diff_weights)
+
+        pred_curvature = pred_diff[:, 1:] - pred_diff[:, :-1]
+        target_curvature = target_diff[:, 1:] - target_diff[:, :-1]
+        curvature_weights = point_weights[2:]
+        curvature_loss = self._weighted_huber(pred_curvature, target_curvature, curvature_weights)
+
+        return (
+            self.point_weight * point_loss
+            + self.diff_weight * diff_loss
+            + self.curvature_weight * curvature_loss
+        )
 
 
 def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
@@ -188,7 +210,10 @@ def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
             y_delta = y_delta.to(device)
 
             pred_delta = model(x)
-            loss = criterion(pred_delta, y_delta)
+            last_val = x[:, 0, -1].unsqueeze(1)
+            pred_abs = pred_delta + last_val
+            true_abs = y_delta + last_val
+            loss = criterion(pred_abs, true_abs)
 
             if training:
                 optimizer.zero_grad()
@@ -201,6 +226,12 @@ def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
             total_count += batch_size
 
     return total_loss / max(total_count, 1)
+
+
+def compute_window_rmse(model, loader, train_std, train_mean, device):
+    preds_raw, targets_raw = collect_predictions(model, loader, train_std, train_mean, device)
+    window_rmse = np.sqrt(np.mean((targets_raw - preds_raw) ** 2, axis=1))
+    return float(window_rmse.mean())
 
 
 def collect_predictions(model, loader, train_std, train_mean, device):
@@ -362,7 +393,7 @@ def train_one_experiment(
         dropout=args.dropout,
     ).to(device)
 
-    criterion = WeightedHuberLoss(pred_len=pred_len, delta=1.0).to(device)
+    criterion = TrajectoryAwareLoss(pred_len=pred_len, delta=1.0).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -372,6 +403,7 @@ def train_one_experiment(
     )
 
     best_val_loss = float("inf")
+    best_val_window_rmse = float("inf")
     best_state = copy.deepcopy(model.state_dict())
     history = []
     patience_counter = 0
@@ -382,7 +414,8 @@ def train_one_experiment(
     for epoch in range(1, args.epochs + 1):
         train_loss = run_epoch(model, train_loader, criterion, optimizer, device)
         val_loss = run_epoch(model, val_loader, criterion, optimizer=None, device=device)
-        scheduler.step(val_loss)
+        val_window_rmse = compute_window_rmse(model, val_loader, train_std, train_mean, device)
+        scheduler.step(val_window_rmse)
         current_lr = optimizer.param_groups[0]["lr"]
 
         history.append(
@@ -390,13 +423,18 @@ def train_one_experiment(
                 "epoch": epoch,
                 "train_loss": train_loss,
                 "val_loss": val_loss,
+                "val_window_rmse": val_window_rmse,
                 "lr": current_lr,
             }
         )
 
-        print(f"Epoch {epoch:03d} | train={train_loss:.6f} | val={val_loss:.6f} | lr={current_lr:.2e}")
+        print(
+            f"Epoch {epoch:03d} | train={train_loss:.6f} | val={val_loss:.6f} "
+            f"| val_window_rmse={val_window_rmse:.6f} | lr={current_lr:.2e}"
+        )
 
-        if val_loss < best_val_loss - args.min_delta:
+        if val_window_rmse < best_val_window_rmse - args.min_delta:
+            best_val_window_rmse = val_window_rmse
             best_val_loss = val_loss
             best_state = copy.deepcopy(model.state_dict())
             patience_counter = 0
@@ -431,6 +469,7 @@ def train_one_experiment(
         "pred_len": pred_len,
         "model_state_dict": copy.deepcopy(model.state_dict()),
         "best_val_loss": best_val_loss,
+        "best_val_window_rmse": best_val_window_rmse,
         "history": pd.DataFrame(history),
         "metrics": metrics,
         "baseline_rmse": baseline,
@@ -503,6 +542,7 @@ def main():
                 "input_len": result["input_len"],
                 "pred_len": result["pred_len"],
                 "best_val_loss": result["best_val_loss"],
+                "best_val_window_rmse": result["best_val_window_rmse"],
                 "test_rmse": result["metrics"]["rmse"],
                 "test_mae": result["metrics"]["mae"],
                 "test_r2": result["metrics"]["r2"],
@@ -510,7 +550,7 @@ def main():
             }
             for result in experiment_results
         ]
-    ).sort_values(by="best_val_loss").reset_index(drop=True)
+    ).sort_values(by="best_val_window_rmse").reset_index(drop=True)
 
     summary_path = os.path.join(args.output_dir, "experiment_summary.csv")
     summary_df.to_csv(summary_path, index=False)
@@ -518,13 +558,14 @@ def main():
     print(summary_df)
     print(f"Saved summary to: {summary_path}")
 
-    best_result = min(experiment_results, key=lambda item: item["best_val_loss"])
+    best_result = min(experiment_results, key=lambda item: item["best_val_window_rmse"])
     best_input_len = best_result["input_len"]
     best_pred_len = best_result["pred_len"]
 
     print(
         f"\\nBest config -> INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len}, "
         f"best_val_loss={best_result['best_val_loss']:.6f}, "
+        f"best_val_window_rmse={best_result['best_val_window_rmse']:.6f}, "
         f"test_rmse={best_result['metrics']['rmse']:.6f}"
     )
 
@@ -532,6 +573,7 @@ def main():
     best_checkpoint = {
         "model_state_dict": best_result["model_state_dict"],
         "best_val_loss": float(best_result["best_val_loss"]),
+        "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
         "train_mean": float(train_mean),
         "train_std": float(train_std),
         "input_len": int(best_input_len),
@@ -559,6 +601,7 @@ def main():
         "best_input_len": int(best_input_len),
         "best_pred_len": int(best_pred_len),
         "best_val_loss": float(best_result["best_val_loss"]),
+        "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
         "metrics": best_result["metrics"],
         "baseline_rmse": float(best_result["baseline_rmse"]),
     }
