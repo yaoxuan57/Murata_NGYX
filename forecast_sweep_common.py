@@ -75,6 +75,45 @@ def evaluate_metrics(y_true, y_pred):
     }
 
 
+def parse_timestamp_series(series: pd.Series, name: str) -> pd.Series:
+    raw = series.astype(str).str.strip()
+    parsed = pd.to_datetime(raw, format="%Y-%m-%d %H:%M:%S", errors="coerce")
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            format="%Y-%m-%d %H:%M",
+            errors="coerce",
+        )
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            format="%d/%m/%Y %H:%M",
+            errors="coerce",
+        )
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            dayfirst=True,
+            errors="coerce",
+        )
+
+    remaining_bad = parsed.isna()
+    if remaining_bad.any():
+        bad_examples = raw.loc[remaining_bad].head(5).tolist()
+        raise ValueError(
+            f"Failed to parse some TIMESTAMP values in {name}. "
+            f"Examples: {bad_examples}"
+        )
+
+    return parsed
+
+
 class MultiStepDeltaDataset(Dataset):
     def __init__(self, series_norm, input_len, pred_len):
         series_norm = np.asarray(series_norm, dtype=np.float32)
@@ -337,20 +376,8 @@ def run_sweep(
     df_train_val = pd.read_csv(args.train_val_csv)
     df_test = pd.read_csv(args.test_csv)
 
-    # Murata timestamps are day-first (dd/mm/YYYY HH:MM).
-    df_train_val["TIMESTAMP"] = pd.to_datetime(
-        df_train_val["TIMESTAMP"],
-        format="%d/%m/%Y %H:%M",
-        errors="coerce",
-    )
-    df_test["TIMESTAMP"] = pd.to_datetime(
-        df_test["TIMESTAMP"],
-        format="%d/%m/%Y %H:%M",
-        errors="coerce",
-    )
-
-    if df_train_val["TIMESTAMP"].isna().any() or df_test["TIMESTAMP"].isna().any():
-        raise ValueError("Failed to parse some TIMESTAMP values. Check timestamp format in CSV files.")
+    df_train_val["TIMESTAMP"] = parse_timestamp_series(df_train_val["TIMESTAMP"], args.train_val_csv)
+    df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
 
     tv_series = df_train_val["Acceleration RMS"].to_numpy(dtype=np.float32)
     test_series = df_test["Acceleration RMS"].to_numpy(dtype=np.float32)
