@@ -19,4 +19,4 @@ mkdir -p ~/logs
 # module load apptainer
 # apptainer exec --nv /path/to/container.sif python train_patchtst_decomp_sweep.py --epochs 150
 
-python train_patchtst_decomp_sweep.py --epochs 150
+python -u train_patchtst_decomp_sweep.py --epochs 150

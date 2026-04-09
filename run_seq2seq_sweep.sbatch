@@ -19,4 +19,4 @@ mkdir -p ~/logs
 # module load apptainer
 # apptainer exec --nv /path/to/container.sif python train_seq2seq_sweep.py --epochs 150
 
-python train_seq2seq_sweep.py --epochs 150
+python -u train_seq2seq_sweep.py --epochs 150

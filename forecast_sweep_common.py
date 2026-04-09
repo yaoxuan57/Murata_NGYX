@@ -337,8 +337,20 @@ def run_sweep(
     df_train_val = pd.read_csv(args.train_val_csv)
     df_test = pd.read_csv(args.test_csv)
 
-    df_train_val["TIMESTAMP"] = pd.to_datetime(df_train_val["TIMESTAMP"])
-    df_test["TIMESTAMP"] = pd.to_datetime(df_test["TIMESTAMP"])
+    # Murata timestamps are day-first (dd/mm/YYYY HH:MM).
+    df_train_val["TIMESTAMP"] = pd.to_datetime(
+        df_train_val["TIMESTAMP"],
+        format="%d/%m/%Y %H:%M",
+        errors="coerce",
+    )
+    df_test["TIMESTAMP"] = pd.to_datetime(
+        df_test["TIMESTAMP"],
+        format="%d/%m/%Y %H:%M",
+        errors="coerce",
+    )
+
+    if df_train_val["TIMESTAMP"].isna().any() or df_test["TIMESTAMP"].isna().any():
+        raise ValueError("Failed to parse some TIMESTAMP values. Check timestamp format in CSV files.")
 
     tv_series = df_train_val["Acceleration RMS"].to_numpy(dtype=np.float32)
     test_series = df_test["Acceleration RMS"].to_numpy(dtype=np.float32)
