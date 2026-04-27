@@ -23,11 +23,11 @@ mkdir -p "${RUNS}" "${BEST}"
 COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 36"
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
 
-# 1) Run candidate configs without heavy per-window plot generation.
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --no-window-plots --input-lens 576 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_576_k11_lr5e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --no-window-plots --input-lens 576 --kernel-size 17 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_576_k17_lr5e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --no-window-plots --input-lens 432 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_432_k11_lr2e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --no-window-plots --input-lens 864 --kernel-size 17 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_864_k17_lr2e4"
+# 1) Run candidate configs and save window plots for each candidate.
+python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 576 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_576_k11_lr5e4"
+python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 576 --kernel-size 17 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_576_k17_lr5e4"
+python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 432 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_432_k11_lr2e4"
+python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 864 --kernel-size 17 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_864_k17_lr2e4"
 
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_dlinear_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
