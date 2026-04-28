@@ -66,6 +66,11 @@ def mae_np(y_true, y_pred):
     return float(np.mean(np.abs(y_true - y_pred)))
 
 
+def mape_np(y_true, y_pred):
+    denom = np.maximum(np.abs(y_true), 1e-8)
+    return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
+
+
 def r2_np(y_true, y_pred):
     y_true_flat = y_true.reshape(-1)
     y_pred_flat = y_pred.reshape(-1)
@@ -79,6 +84,7 @@ def evaluate_metrics(y_true, y_pred):
         "mse": mse_np(y_true, y_pred),
         "rmse": rmse_np(y_true, y_pred),
         "mae": mae_np(y_true, y_pred),
+        "mape": mape_np(y_true, y_pred),
         "r2": r2_np(y_true, y_pred),
     }
 
@@ -574,8 +580,10 @@ def run_sweep(
                 "pred_len": result["pred_len"],
                 "best_val_loss": result["best_val_loss"],
                 "best_val_window_rmse": result["best_val_window_rmse"],
+                "test_mse": result["metrics"]["mse"],
                 "test_rmse": result["metrics"]["rmse"],
                 "test_mae": result["metrics"]["mae"],
+                "test_mape": result["metrics"]["mape"],
                 "test_r2": result["metrics"]["r2"],
                 "baseline_rmse": result["baseline_rmse"],
             }
@@ -656,7 +664,9 @@ def run_sweep(
         "model_config": model_config_factory(args, best_input_len, best_pred_len),
         "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
         "test_rmse": float(best_result["metrics"]["rmse"]),
+        "test_mse": float(best_result["metrics"]["mse"]),
         "test_mae": float(best_result["metrics"]["mae"]),
+        "test_mape": float(best_result["metrics"]["mape"]),
         "test_r2": float(best_result["metrics"]["r2"]),
     }
     with open(best_config_path, "w", encoding="utf-8") as fp:
@@ -770,6 +780,7 @@ def run_sweep(
     print(f"Test MSE : {best_result['metrics']['mse']:.6f}")
     print(f"Test RMSE: {best_result['metrics']['rmse']:.6f}")
     print(f"Test MAE : {best_result['metrics']['mae']:.6f}")
+    print(f"Test MAPE: {best_result['metrics']['mape']:.6f}%")
     print(f"Test R2  : {best_result['metrics']['r2']:.6f}")
     print(f"Baseline RMSE: {best_result['baseline_rmse']:.6f}")
 
