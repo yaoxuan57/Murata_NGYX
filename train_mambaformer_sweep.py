@@ -570,6 +570,40 @@ def main():
     with open(metrics_path, "w", encoding="utf-8") as fp:
         json.dump(metrics_payload, fp, indent=2)
 
+    best_config_path = os.path.join(args.output_dir, "best_config.json")
+    best_config_payload = {
+        "train_val_csv": args.train_val_csv,
+        "test_csv": args.test_csv,
+        "output_dir": args.output_dir,
+        "seed": args.seed,
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "val_ratio": args.val_ratio,
+        "early_stopping_patience": args.early_stopping_patience,
+        "scheduler_patience": args.scheduler_patience,
+        "scheduler_factor": args.scheduler_factor,
+        "min_delta": args.min_delta,
+        "best_input_len": int(best_input_len),
+        "best_pred_len": int(best_pred_len),
+        "model_config": {
+            "seq_len": int(best_input_len),
+            "input_dim": 1,
+            "pred_len": int(best_pred_len),
+            "d_model": args.d_model,
+            "d_inner": args.d_inner,
+            "nhead": args.nhead,
+            "num_mamba_layers": args.num_mamba_layers,
+            "num_former_layers": args.num_former_layers,
+            "dim_feedforward": args.dim_feedforward,
+            "dropout": args.dropout,
+        },
+        "supports_save_window_plots": False,
+    }
+    with open(best_config_path, "w", encoding="utf-8") as fp:
+        json.dump(best_config_payload, fp, indent=2)
+
     horizon_path = os.path.join(args.output_dir, "best_horizon_rmse.csv")
     pd.DataFrame(
         {
@@ -662,6 +696,7 @@ def main():
     print(f"- {summary_path}")
     print(f"- {history_path}")
     print(f"- {metrics_path}")
+    print(f"- {best_config_path}")
     print(f"- {horizon_path}")
     print(f"- {sample_path}")
     print(f"- {checkpoint_path}")

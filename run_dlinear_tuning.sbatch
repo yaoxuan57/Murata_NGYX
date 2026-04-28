@@ -25,9 +25,9 @@ COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-wei
 
 # 1) Run candidate configs and save window plots for each candidate.
 python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 864 --kernel-size 17 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k17_lr5e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1296 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1296_k11_lr2e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1296 --kernel-size 17 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1296_k17_lr2e4"
+python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1296 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_k11_lr5e4"
+python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
+python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 2160 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_k11_lr2e4"
 
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_dlinear_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
