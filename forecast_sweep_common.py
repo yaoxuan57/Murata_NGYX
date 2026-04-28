@@ -376,6 +376,38 @@ def save_rolling_window_forecasts(
     combined_csv_path = os.path.join(windows_dir, "all_windows_forecasts.csv")
     combined_df.to_csv(combined_csv_path, index=False)
 
+    if save_plots:
+        generated_plot_count = len(
+            [name for name in os.listdir(plots_dir) if name.startswith("window_") and name.endswith(".png")]
+        )
+        if generated_plot_count < n_windows:
+            print(
+                f"Detected only {generated_plot_count}/{n_windows} rolling-window PNGs under {plots_dir}. "
+                "Regenerating missing plots before exit."
+            )
+            for window_df in all_rows:
+                window_idx = int(window_df["window_index"].iloc[0])
+                window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
+                if os.path.isfile(window_plot_path):
+                    continue
+
+                plt.figure(figsize=(8, 3))
+                plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
+                plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
+                plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
+                plt.xlabel("Step Ahead")
+                plt.ylabel("Acceleration RMS")
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(window_plot_path, dpi=140)
+                plt.close()
+
+            final_plot_count = len(
+                [name for name in os.listdir(plots_dir) if name.startswith("window_") and name.endswith(".png")]
+            )
+            print(f"Rolling-window PNGs available: {final_plot_count}/{n_windows}")
+
     return windows_dir, combined_csv_path
 
 
