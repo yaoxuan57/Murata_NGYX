@@ -32,6 +32,9 @@ python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-pl
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_dlinear_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
 
+# 2b) Ensure every candidate run has rolling-window plot PNGs.
+python -u ensure_rolling_window_plots.py --runs-root "${RUNS}"
+
 # 3) Re-run only the selected best candidate with window plots enabled.
 python -u rerun_best_dlinear_with_plots.py \
 	--selection-json "${RUNS}/best_run_selection.json" \
@@ -44,4 +47,5 @@ python -u select_best_dlinear_run.py --runs-root "${BEST}" --out-json "best_mode
 echo "DLinear tuning completed."
 echo "Candidates ranking: ${RUNS}/dlinear_run_ranking.csv"
 echo "Selected best candidate metadata: ${RUNS}/best_run_selection.json"
+echo "Candidate run plots under: ${RUNS}/<cfg>/rolling_window_forecasts/plots"
 echo "Best-model-only window plots under: ${BEST}/<best_cfg>/rolling_window_forecasts/plots"
