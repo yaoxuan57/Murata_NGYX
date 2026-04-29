@@ -40,6 +40,11 @@ def parse_args():
     parser.add_argument("--min-delta", type=float, default=1e-4)
     parser.add_argument("--plot-sample-idx", type=int, default=200)
     parser.add_argument("--checkpoint-name", type=str, default="transformer_delta_huber_date_split_best.pth")
+    parser.add_argument("--loss-huber-delta", type=float, default=1.0)
+    parser.add_argument("--loss-point-weight", type=float, default=0.4)
+    parser.add_argument("--loss-diff-weight", type=float, default=1.2)
+    parser.add_argument("--loss-curvature-weight", type=float, default=0.8)
+    parser.add_argument("--loss-variance-weight", type=float, default=0.4)
     return parser.parse_args()
 
 
@@ -413,7 +418,14 @@ def train_one_experiment(
         dropout=args.dropout,
     ).to(device)
 
-    criterion = TrajectoryAwareLoss(pred_len=pred_len, delta=1.0).to(device)
+    criterion = TrajectoryAwareLoss(
+        pred_len=pred_len,
+        delta=args.loss_huber_delta,
+        point_weight=args.loss_point_weight,
+        diff_weight=args.loss_diff_weight,
+        curvature_weight=args.loss_curvature_weight,
+        variance_weight=args.loss_variance_weight,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -645,6 +657,11 @@ def main():
         "scheduler_patience": args.scheduler_patience,
         "scheduler_factor": args.scheduler_factor,
         "min_delta": args.min_delta,
+        "loss_huber_delta": args.loss_huber_delta,
+        "loss_point_weight": args.loss_point_weight,
+        "loss_diff_weight": args.loss_diff_weight,
+        "loss_curvature_weight": args.loss_curvature_weight,
+        "loss_variance_weight": args.loss_variance_weight,
         "best_input_len": int(best_input_len),
         "best_pred_len": int(best_pred_len),
         "model_config": {
