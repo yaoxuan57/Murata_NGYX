@@ -15,34 +15,50 @@ set -euo pipefail
 
 mkdir -p ~/logs
 
-ROOT=outputs_dlinear_tuning
+COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288"
+COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
+# Toggle MoE mode from submission command:
+#   sbatch --export=USE_MOE=1,MOE_NUM_EXPERTS=4 run_dlinear_tuning.sbatch
+# Default is plain DLinear (USE_MOE=0).
+USE_MOE=${USE_MOE:-1}
+MOE_NUM_EXPERTS=${MOE_NUM_EXPERTS:-4}
+
+if [ "${USE_MOE}" = "1" ]; then
+  TRAIN_SCRIPT="train_moe_dlinear_sweep.py"
+  EXTRA_MODEL_ARGS="--num-experts ${MOE_NUM_EXPERTS}"
+  RUN_TAG="moe_k${MOE_NUM_EXPERTS}"
+else
+  TRAIN_SCRIPT="train_dlinear_sweep.py"
+  EXTRA_MODEL_ARGS=""
+  RUN_TAG="dlinear"
+fi
+
+ROOT=outputs_dlinear_tuning_${RUN_TAG}
 RUNS=${ROOT}/runs
 BEST=${ROOT}/best_model
 mkdir -p "${RUNS}" "${BEST}"
 
-COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288"
-COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
-
 # 1) Run candidate configs and save window plots for each candidate.
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1296 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_k11_lr5e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
-python -u train_dlinear_sweep.py ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 2160 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_k11_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4_moe${MOE_NUM_EXPERTS}"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4_moe${MOE_NUM_EXPERTS}"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
 
 # 2) Rank all candidate runs and store best config summary.
-python -u select_best_dlinear_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
+python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
 
 # 3) Re-run only the selected best candidate with window plots enabled.
-python -u rerun_best_dlinear_with_plots.py \
+python -u rerun_best_sweep_with_plots.py \
 	--selection-json "${RUNS}/best_run_selection.json" \
+	--train-script "${TRAIN_SCRIPT}" \
 	--output-root "${BEST}" \
 	${COMMON_TRAIN} \
 	${COMMON_LOSS}
 
-python -u select_best_dlinear_run.py --runs-root "${BEST}" --out-json "best_model_selection.json"
+python -u select_best_sweep_run.py --runs-root "${BEST}" --out-json "best_model_selection.json"
 
-echo "DLinear tuning completed."
-echo "Candidates ranking: ${RUNS}/dlinear_run_ranking.csv"
+echo "Tuning completed. Mode=${RUN_TAG}"
+echo "Candidates ranking: ${RUNS}/sweep_run_ranking.csv"
 echo "Selected best candidate metadata: ${RUNS}/best_run_selection.json"
 echo "Candidate run plots under: ${RUNS}/<cfg>/rolling_window_forecasts/plots"
 echo "Best-model-only window plots under: ${BEST}/<best_cfg>/rolling_window_forecasts/plots"
