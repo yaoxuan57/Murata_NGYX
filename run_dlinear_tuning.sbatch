@@ -17,6 +17,14 @@ mkdir -p ~/logs
 
 COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288"
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
+
+# Dataset selection (override at submit time).
+# Ensure your CSVs have columns: TIMESTAMP and Acceleration RMS
+TRAIN_VAL_CSV=${TRAIN_VAL_CSV:-data_train_val.csv}
+TEST_CSV=${TEST_CSV:-data_test_anomalous.csv}
+TRAIN_VAL_BASENAME="$(basename "${TRAIN_VAL_CSV}" .csv)"
+TEST_BASENAME="$(basename "${TEST_CSV}" .csv)"
+DATA_TAG="${TRAIN_VAL_BASENAME}_to_${TEST_BASENAME}"
 # Toggle MoE mode from submission command:
 #   sbatch --export=USE_MOE=1,MOE_NUM_EXPERTS=4 run_dlinear_tuning.sbatch
 # Default is plain DLinear (USE_MOE=0).
@@ -26,12 +34,13 @@ MOE_EXPERTS_LIST=${MOE_EXPERTS_LIST:-${MOE_NUM_EXPERTS}}
 
 if [ "${USE_MOE}" = "1" ]; then
   TRAIN_SCRIPT="train_moe_dlinear_sweep.py"
+  DATA_FLAGS="--train-val-csv ${TRAIN_VAL_CSV} --test-csv ${TEST_CSV}"
 
   for MOE_NUM_EXPERTS in ${MOE_EXPERTS_LIST}; do
     EXTRA_MODEL_ARGS="--num-experts ${MOE_NUM_EXPERTS}"
     RUN_TAG="moe_k${MOE_NUM_EXPERTS}"
 
-    ROOT="outputs_dlinear_tuning_${RUN_TAG}"
+    ROOT="outputs_dlinear_tuning_${RUN_TAG}_${DATA_TAG}"
     RUNS="${ROOT}/runs"
     BEST="${ROOT}/best_model"
     mkdir -p "${RUNS}" "${BEST}"
@@ -39,8 +48,8 @@ if [ "${USE_MOE}" = "1" ]; then
     echo "Running MoE tuning with ${MOE_NUM_EXPERTS} experts -> ${RUN_TAG}"
 
     # 1) Run candidate configs and save window plots for each candidate.
-    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4_moe${MOE_NUM_EXPERTS}"
-    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
+    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4_moe${MOE_NUM_EXPERTS}"
+    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
 
     # 2) Rank all candidate runs and store best config summary.
     python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
@@ -50,6 +59,8 @@ if [ "${USE_MOE}" = "1" ]; then
       --selection-json "${RUNS}/best_run_selection.json" \
       --train-script "${TRAIN_SCRIPT}" \
       --output-root "${BEST}" \
+      --train-val-csv "${TRAIN_VAL_CSV}" \
+      --test-csv "${TEST_CSV}" \
       ${COMMON_TRAIN} \
       ${COMMON_LOSS}
 
@@ -64,17 +75,18 @@ if [ "${USE_MOE}" = "1" ]; then
 else
   TRAIN_SCRIPT="train_dlinear_sweep.py"
   RUN_TAG="dlinear"
+  DATA_FLAGS="--train-val-csv ${TRAIN_VAL_CSV} --test-csv ${TEST_CSV}"
 
-  ROOT="outputs_dlinear_tuning_${RUN_TAG}"
+  ROOT="outputs_dlinear_tuning_${RUN_TAG}_${DATA_TAG}"
   RUNS="${ROOT}/runs"
   BEST="${ROOT}/best_model"
   mkdir -p "${RUNS}" "${BEST}"
 
   # 1) Run candidate configs and save window plots for each candidate.
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4"
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4"
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1728_k11_lr5e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
 
   # 2) Rank all candidate runs and store best config summary.
   python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
@@ -84,6 +96,8 @@ else
     --selection-json "${RUNS}/best_run_selection.json" \
     --train-script "${TRAIN_SCRIPT}" \
     --output-root "${BEST}" \
+    --train-val-csv "${TRAIN_VAL_CSV}" \
+    --test-csv "${TEST_CSV}" \
     ${COMMON_TRAIN} \
     ${COMMON_LOSS}
 
