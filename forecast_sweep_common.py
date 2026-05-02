@@ -2,7 +2,7 @@ import copy
 import json
 import os
 import random
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Optional, Set, Tuple
 
 import matplotlib
 matplotlib.use("Agg")
@@ -41,6 +41,14 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument("--save-window-plots", dest="save_window_plots", action="store_true")
     parser.add_argument("--no-window-plots", dest="save_window_plots", action="store_false")
     parser.set_defaults(save_window_plots=True)
+    parser.add_argument(
+        "--rolling-window-artifact-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="If set, write at most N per-window CSV and PNG files under rolling_window_forecasts/, "
+        "evenly spaced from the first to last window. All windows remain in all_windows_forecasts.csv.",
+    )
     return parser
 
 
@@ -328,6 +336,18 @@ def build_horizon_forecast_dataframe(timestamps, actual, predicted, horizon):
     )
 
 
+def evenly_spaced_window_indices(n_windows: int, k: int) -> Set[int]:
+    """Up to k indices in [0, n_windows-1], equally spaced (endpoints included when k >= 2)."""
+    if n_windows <= 0 or k <= 0:
+        return set()
+    if n_windows <= k:
+        return set(range(n_windows))
+    if k == 1:
+        return {0}
+    out = {int(round(i * (n_windows - 1) / (k - 1))) for i in range(k)}
+    return out
+
+
 def save_rolling_window_forecasts(
     output_dir,
     preds_raw,
@@ -336,6 +356,7 @@ def save_rolling_window_forecasts(
     input_len,
     pred_len,
     save_plots=True,
+    max_per_window_artifacts: Optional[int] = None,
 ):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
@@ -345,6 +366,21 @@ def save_rolling_window_forecasts(
 
     all_rows = []
     n_windows = preds_raw.shape[0]
+
+    if max_per_window_artifacts is None or max_per_window_artifacts <= 0:
+        save_indices = set(range(n_windows))
+    else:
+        save_indices = evenly_spaced_window_indices(n_windows, max_per_window_artifacts)
+
+    if (
+        max_per_window_artifacts is not None
+        and max_per_window_artifacts > 0
+        and n_windows > len(save_indices)
+    ):
+        print(
+            f"Rolling-window artifacts: writing {len(save_indices)} per-window CSV/PNG files "
+            f"(evenly spaced over {n_windows} windows). Full series in all_windows_forecasts.csv."
+        )
 
     for window_idx in range(n_windows):
         start_idx = input_len + window_idx
@@ -360,11 +396,13 @@ def save_rolling_window_forecasts(
             }
         )
 
-        window_csv_path = os.path.join(csv_dir, f"window_{window_idx:06d}.csv")
-        window_df.to_csv(window_csv_path, index=False)
+        if window_idx in save_indices:
+            window_csv_path = os.path.join(csv_dir, f"window_{window_idx:06d}.csv")
+            window_df.to_csv(window_csv_path, index=False)
+
         all_rows.append(window_df)
 
-        if save_plots:
+        if save_plots and window_idx in save_indices:
             plt.figure(figsize=(8, 3))
             plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
             plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
@@ -383,16 +421,19 @@ def save_rolling_window_forecasts(
     combined_df.to_csv(combined_csv_path, index=False)
 
     if save_plots:
+        expected_plots = len(save_indices)
         generated_plot_count = len(
             [name for name in os.listdir(plots_dir) if name.startswith("window_") and name.endswith(".png")]
         )
-        if generated_plot_count < n_windows:
+        if generated_plot_count < expected_plots:
             print(
-                f"Detected only {generated_plot_count}/{n_windows} rolling-window PNGs under {plots_dir}. "
+                f"Detected only {generated_plot_count}/{expected_plots} rolling-window PNGs under {plots_dir}. "
                 "Regenerating missing plots before exit."
             )
             for window_df in all_rows:
                 window_idx = int(window_df["window_index"].iloc[0])
+                if window_idx not in save_indices:
+                    continue
                 window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
                 if os.path.isfile(window_plot_path):
                     continue
@@ -412,7 +453,7 @@ def save_rolling_window_forecasts(
             final_plot_count = len(
                 [name for name in os.listdir(plots_dir) if name.startswith("window_") and name.endswith(".png")]
             )
-            print(f"Rolling-window PNGs available: {final_plot_count}/{n_windows}")
+            print(f"Rolling-window PNGs available: {final_plot_count}/{expected_plots}")
 
     return windows_dir, combined_csv_path
 
@@ -659,6 +700,7 @@ def run_sweep(
         "loss_curvature_weight": args.loss_curvature_weight,
         "loss_variance_weight": args.loss_variance_weight,
         "save_window_plots": args.save_window_plots,
+        "rolling_window_artifact_limit": args.rolling_window_artifact_limit,
         "best_input_len": int(best_input_len),
         "best_pred_len": int(best_pred_len),
         "model_config": model_config_factory(args, best_input_len, best_pred_len),
@@ -761,6 +803,7 @@ def run_sweep(
         input_len=best_input_len,
         pred_len=best_pred_len,
         save_plots=args.save_window_plots,
+        max_per_window_artifacts=args.rolling_window_artifact_limit,
     )
 
     save_plot(

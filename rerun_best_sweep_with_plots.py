@@ -21,6 +21,13 @@ def parse_args():
     parser.add_argument("--loss-variance-weight", type=float, default=0.2)
     parser.add_argument("--train-val-csv", type=str, default=None)
     parser.add_argument("--test-csv", type=str, default=None)
+    parser.add_argument(
+        "--rolling-window-artifact-limit",
+        type=int,
+        default=None,
+        help="If set, passed through to the train script (per-window CSV/PNG cap). "
+        "When omitted, uses best_config.rolling_window_artifact_limit when present.",
+    )
     return parser.parse_args()
 
 
@@ -97,6 +104,12 @@ def main():
         )
     if supports_save_window_plots:
         cmd.append("--save-window-plots")
+
+    rolling_limit = args.rolling_window_artifact_limit
+    if rolling_limit is None:
+        rolling_limit = best_config.get("rolling_window_artifact_limit")
+    if rolling_limit is not None:
+        cmd.extend(["--rolling-window-artifact-limit", str(rolling_limit)])
 
     append_optional(cmd, "--lr", lr)
     append_optional(cmd, "--weight-decay", weight_decay)
