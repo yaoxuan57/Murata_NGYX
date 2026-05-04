@@ -22,7 +22,7 @@ ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
 COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}"
 
 # Dataset selection (override at submit time).
-# Ensure your CSVs have columns: TIMESTAMP and Acceleration RMS
+# CSVs must include TIMESTAMP and the target column (default: Acceleration RMS (smoothed); override with --value-column).
 TRAIN_VAL_CSV=${TRAIN_VAL_CSV:-data_train_val.csv}
 TEST_CSV=${TEST_CSV:-data_test_anomalous.csv}
 TRAIN_VAL_BASENAME="$(basename "${TRAIN_VAL_CSV}" .csv)"

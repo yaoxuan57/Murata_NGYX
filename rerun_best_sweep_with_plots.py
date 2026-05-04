@@ -113,6 +113,9 @@ def main():
 
     append_optional(cmd, "--lr", lr)
     append_optional(cmd, "--weight-decay", weight_decay)
+    value_column = best_config.get("value_column")
+    if value_column is not None:
+        cmd.extend(["--value-column", str(value_column)])
     cmd.extend(model_config_to_flags(model_config))
     cmd.extend(["--output-dir", out_dir])
 

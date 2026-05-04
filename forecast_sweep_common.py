@@ -17,6 +17,12 @@ from torch.utils.data import DataLoader, Dataset, Subset
 def add_common_args(parser, default_output_dir: str, default_checkpoint_name: str):
     parser.add_argument("--train-val-csv", type=str, default="data_train_val.csv")
     parser.add_argument("--test-csv", type=str, default="data_test_anomalous.csv")
+    parser.add_argument(
+        "--value-column",
+        type=str,
+        default="Acceleration RMS (smoothed)",
+        help="CSV column used as the univariate forecast target. Use 'Acceleration RMS' for raw (unsmoothed) CSVs.",
+    )
     parser.add_argument("--output-dir", type=str, default=default_output_dir)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -357,6 +363,7 @@ def save_rolling_window_forecasts(
     pred_len,
     save_plots=True,
     max_per_window_artifacts: Optional[int] = None,
+    y_axis_label: str = "Value",
 ):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
@@ -408,7 +415,7 @@ def save_rolling_window_forecasts(
             plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
             plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
             plt.xlabel("Step Ahead")
-            plt.ylabel("Acceleration RMS")
+            plt.ylabel(y_axis_label)
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
@@ -443,7 +450,7 @@ def save_rolling_window_forecasts(
                 plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
                 plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
                 plt.xlabel("Step Ahead")
-                plt.ylabel("Acceleration RMS")
+                plt.ylabel(y_axis_label)
                 plt.legend()
                 plt.grid(True)
                 plt.tight_layout()
@@ -475,8 +482,19 @@ def run_sweep(
     df_train_val["TIMESTAMP"] = parse_timestamp_series(df_train_val["TIMESTAMP"], args.train_val_csv)
     df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
 
-    tv_series = df_train_val["Acceleration RMS"].to_numpy(dtype=np.float32)
-    test_series = df_test["Acceleration RMS"].to_numpy(dtype=np.float32)
+    vc = args.value_column
+    for label, frame, csv_path in (
+        ("train_val", df_train_val, args.train_val_csv),
+        ("test", df_test, args.test_csv),
+    ):
+        if vc not in frame.columns:
+            raise ValueError(
+                f"Value column {vc!r} not found in {label} CSV {csv_path!r}. "
+                f"Columns: {list(frame.columns)}. Pass --value-column with an existing column name."
+            )
+
+    tv_series = df_train_val[vc].to_numpy(dtype=np.float32)
+    test_series = df_test[vc].to_numpy(dtype=np.float32)
 
     print(f"Train+Val series length : {len(tv_series)}")
     print(f"Test series length      : {len(test_series)}")
@@ -683,6 +701,7 @@ def run_sweep(
     best_config_payload = {
         "train_val_csv": args.train_val_csv,
         "test_csv": args.test_csv,
+        "value_column": args.value_column,
         "output_dir": args.output_dir,
         "seed": args.seed,
         "batch_size": args.batch_size,
@@ -747,7 +766,7 @@ def run_sweep(
         path=os.path.join(args.output_dir, "best_sample_forecast.png"),
         title=f"Single Forecast Window - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
         x_label="Date",
-        y_label="Acceleration RMS",
+        y_label=args.value_column,
         x=best_result["sample_timestamps"],
         y1=best_result["sample_true_raw"],
         y1_label="Actual forecast",
@@ -773,7 +792,7 @@ def run_sweep(
         path=os.path.join(args.output_dir, "best_horizon_1.png"),
         title=f"Horizon-1 Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
         x_label="Date",
-        y_label="Acceleration RMS",
+        y_label=args.value_column,
         x=ts_h1,
         y1=h_true,
         y1_label="Actual",
@@ -804,13 +823,14 @@ def run_sweep(
         pred_len=best_pred_len,
         save_plots=args.save_window_plots,
         max_per_window_artifacts=args.rolling_window_artifact_limit,
+        y_axis_label=args.value_column,
     )
 
     save_plot(
         path=os.path.join(args.output_dir, f"best_horizon_{h + 1}.png"),
         title=f"Horizon-{h + 1} Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
         x_label="Date",
-        y_label="Acceleration RMS",
+        y_label=args.value_column,
         x=ts_hn,
         y1=h_true,
         y1_label="Actual",
