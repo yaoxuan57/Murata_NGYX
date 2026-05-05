@@ -33,7 +33,7 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument("--pred-lens", type=int, nargs="+", default=[288])
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--val-ratio", type=float, default=0.15)
-    parser.add_argument("--early-stopping-patience", type=int, default=10)
+    parser.add_argument("--early-stopping-patience", type=int, default=20)
     parser.add_argument("--scheduler-patience", type=int, default=3)
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
     parser.add_argument("--min-delta", type=float, default=1e-4)
@@ -41,13 +41,13 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument("--checkpoint-name", type=str, default=default_checkpoint_name)
     parser.add_argument("--loss-huber-delta", type=float, default=1.0)
     parser.add_argument("--loss-point-weight", type=float, default=0.2)
-    parser.add_argument("--loss-diff-weight", type=float, default=3.2)
+    parser.add_argument("--loss-diff-weight", type=float, default=5)
     parser.add_argument("--loss-curvature-weight", type=float, default=2.0)
     parser.add_argument("--loss-variance-weight", type=float, default=0.8)
     parser.add_argument(
         "--loss-laplacian-weight",
         type=float,
-        default=0.15,
+        default=0.3,
         help="Extra penalty on mean squared second difference of the predicted trajectory "
         "(suppresses high-frequency jaggedness). Set 0 to disable.",
     )

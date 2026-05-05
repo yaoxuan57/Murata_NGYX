@@ -161,7 +161,7 @@ def parse_args():
     parser.set_defaults(use_residual_head=True)
     parser.add_argument("--residual-hidden", type=int, default=128)
     parser.add_argument("--residual-dropout", type=float, default=0.1)
-    parser.add_argument("--residual-weight", type=float, default=0.25)
+    parser.add_argument("--residual-weight", type=float, default=0.1)
     return parser.parse_args()
 
 
