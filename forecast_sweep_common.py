@@ -44,6 +44,21 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument("--loss-diff-weight", type=float, default=3.2)
     parser.add_argument("--loss-curvature-weight", type=float, default=2.0)
     parser.add_argument("--loss-variance-weight", type=float, default=0.8)
+    parser.add_argument(
+        "--loss-laplacian-weight",
+        type=float,
+        default=0.15,
+        help="Extra penalty on mean squared second difference of the predicted trajectory "
+        "(suppresses high-frequency jaggedness). Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--pred-smoothing-window",
+        type=int,
+        default=1,
+        metavar="K",
+        help="If K>1, apply a centered length-K moving average to each test forecast row "
+        "(raw model output) before metrics and saved plots/CSVs. K is bumped up by 1 if even. K=1 disables.",
+    )
     parser.add_argument("--save-window-plots", dest="save_window_plots", action="store_true")
     parser.add_argument("--no-window-plots", dest="save_window_plots", action="store_false")
     parser.set_defaults(save_window_plots=True)
@@ -83,6 +98,33 @@ def mae_np(y_true, y_pred):
 def mape_np(y_true, y_pred):
     denom = np.maximum(np.abs(y_true), 1e-8)
     return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
+
+
+def smooth_forecast_horizons(preds: np.ndarray, window: int) -> np.ndarray:
+    """Row-wise centered moving average for arrays shaped (n_windows, pred_len)."""
+    if window <= 1:
+        return preds
+    w = window if window % 2 == 1 else window + 1
+    pad = w // 2
+    kernel = np.ones(w, dtype=np.float64) / w
+    out = np.empty_like(preds, dtype=np.float64)
+    for i in range(preds.shape[0]):
+        y = np.asarray(preds[i], dtype=np.float64)
+        y_pad = np.pad(y, (pad, pad), mode="edge")
+        out[i] = np.convolve(y_pad, kernel, mode="valid")
+    return out.astype(preds.dtype, copy=False)
+
+
+def smooth_forecast_vector(vec: np.ndarray, window: int) -> np.ndarray:
+    """Centered moving average for a single 1D forecast (pred_len,)."""
+    if window <= 1:
+        return vec
+    w = window if window % 2 == 1 else window + 1
+    pad = w // 2
+    y = np.asarray(vec, dtype=np.float64)
+    kernel = np.ones(w, dtype=np.float64) / w
+    y_pad = np.pad(y, (pad, pad), mode="edge")
+    return np.convolve(y_pad, kernel, mode="valid").astype(vec.dtype, copy=False)
 
 
 def r2_np(y_true, y_pred):
@@ -184,6 +226,7 @@ class TrajectoryAwareLoss(nn.Module):
         diff_weight=1.2,
         curvature_weight=0.8,
         variance_weight=0.4,
+        laplacian_reg_weight=0.0,
     ):
         super().__init__()
         self.delta = delta
@@ -191,6 +234,7 @@ class TrajectoryAwareLoss(nn.Module):
         self.diff_weight = diff_weight
         self.curvature_weight = curvature_weight
         self.variance_weight = variance_weight
+        self.laplacian_reg_weight = laplacian_reg_weight
         w = torch.linspace(1.0, 0.8, pred_len, dtype=torch.float32)
         self.register_buffer("w", w / w.mean())
 
@@ -222,11 +266,18 @@ class TrajectoryAwareLoss(nn.Module):
         target_std = target.std(dim=1, unbiased=False)
         variance_loss = torch.mean(torch.abs(pred_std - target_std))
 
+        if self.laplacian_reg_weight > 0 and pred.size(1) >= 3:
+            d2_pred = pred[:, 2:] - 2.0 * pred[:, 1:-1] + pred[:, :-2]
+            laplacian_reg = (d2_pred ** 2).mean()
+        else:
+            laplacian_reg = pred.new_tensor(0.0)
+
         return (
             self.point_weight * point_loss
             + self.diff_weight * diff_loss
             + self.curvature_weight * curvature_loss
             + self.variance_weight * variance_loss
+            + self.laplacian_reg_weight * laplacian_reg
         )
 
 
@@ -535,6 +586,7 @@ def run_sweep(
                     diff_weight=args.loss_diff_weight,
                     curvature_weight=args.loss_curvature_weight,
                     variance_weight=args.loss_variance_weight,
+                    laplacian_reg_weight=args.loss_laplacian_weight,
                 ).to(device)
                 optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
                 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -554,6 +606,16 @@ def run_sweep(
                 print(
                     f"Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)} | Test samples: {len(test_dataset)}"
                 )
+                if args.pred_smoothing_window > 1:
+                    w = (
+                        args.pred_smoothing_window
+                        if args.pred_smoothing_window % 2 == 1
+                        else args.pred_smoothing_window + 1
+                    )
+                    print(
+                        f"Test forecast post-smoothing: centered MA window={w} "
+                        "(applied to predictions only; validation RMSE during training is unsmoothed)."
+                    )
 
                 for epoch in range(1, args.epochs + 1):
                     train_loss = run_epoch(model, train_loader, criterion, optimizer, device)
@@ -592,6 +654,8 @@ def run_sweep(
                 model.eval()
 
                 all_preds_raw, all_targets_raw = collect_predictions(model, test_loader, train_std, train_mean, device)
+                if args.pred_smoothing_window > 1:
+                    all_preds_raw = smooth_forecast_horizons(all_preds_raw, args.pred_smoothing_window)
                 metrics = evaluate_metrics(all_targets_raw, all_preds_raw)
                 baseline = baseline_rmse(test_loader, pred_len, train_std, train_mean)
                 horizon_rmse = [rmse_np(all_targets_raw[:, h], all_preds_raw[:, h]) for h in range(pred_len)]
@@ -604,6 +668,8 @@ def run_sweep(
                 last_val = x.numpy()[0, -1]
                 pred_raw = (pred_delta + last_val) * train_std + train_mean
                 true_raw = (y_delta.numpy() + last_val) * train_std + train_mean
+                if args.pred_smoothing_window > 1:
+                    pred_raw = smooth_forecast_vector(pred_raw, args.pred_smoothing_window)
 
                 ts_offset = input_len + sample_idx
                 pred_ts = df_test["TIMESTAMP"].iloc[ts_offset: ts_offset + pred_len]
@@ -718,6 +784,8 @@ def run_sweep(
         "loss_diff_weight": args.loss_diff_weight,
         "loss_curvature_weight": args.loss_curvature_weight,
         "loss_variance_weight": args.loss_variance_weight,
+        "loss_laplacian_weight": args.loss_laplacian_weight,
+        "pred_smoothing_window": args.pred_smoothing_window,
         "save_window_plots": args.save_window_plots,
         "rolling_window_artifact_limit": args.rolling_window_artifact_limit,
         "best_input_len": int(best_input_len),

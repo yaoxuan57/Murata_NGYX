@@ -19,6 +19,13 @@ def parse_args():
     parser.add_argument("--loss-diff-weight", type=float, default=0.9)
     parser.add_argument("--loss-curvature-weight", type=float, default=0.5)
     parser.add_argument("--loss-variance-weight", type=float, default=0.2)
+    parser.add_argument("--loss-laplacian-weight", type=float, default=0.15)
+    parser.add_argument(
+        "--pred-smoothing-window",
+        type=int,
+        default=5,
+        help="Passed to train script; 1 disables post-smoothing of test forecasts.",
+    )
     parser.add_argument("--train-val-csv", type=str, default=None)
     parser.add_argument("--test-csv", type=str, default=None)
     parser.add_argument(
@@ -90,6 +97,8 @@ def main():
     if args.test_csv is not None:
         cmd.extend(["--test-csv", args.test_csv])
     if supports_loss_weights:
+        loss_lap = best_config.get("loss_laplacian_weight", args.loss_laplacian_weight)
+        pred_smooth = best_config.get("pred_smoothing_window", args.pred_smoothing_window)
         cmd.extend(
             [
                 "--loss-point-weight",
@@ -100,6 +109,10 @@ def main():
                 str(args.loss_curvature_weight),
                 "--loss-variance-weight",
                 str(args.loss_variance_weight),
+                "--loss-laplacian-weight",
+                str(loss_lap),
+                "--pred-smoothing-window",
+                str(pred_smooth),
             ]
         )
     if supports_save_window_plots:
