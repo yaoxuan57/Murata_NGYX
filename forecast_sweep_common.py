@@ -405,6 +405,38 @@ def evenly_spaced_window_indices(n_windows: int, k: int) -> Set[int]:
     return out
 
 
+def _plot_rolling_window_png(
+    window_idx: int,
+    input_len: int,
+    pred_len: int,
+    history_series_raw: np.ndarray,
+    targets_row: np.ndarray,
+    preds_row: np.ndarray,
+    y_axis_label: str,
+    path: str,
+    dpi: int = 140,
+):
+    """Context = last input_len actual points before forecast; right = forecast actual vs predicted."""
+    hist = np.asarray(history_series_raw[window_idx : window_idx + input_len], dtype=np.float64)
+    x_hist = np.arange(0, input_len, dtype=np.float64)
+    x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
+    w_in = max(10.0, min(22.0, 6.0 + 0.004 * float(input_len + pred_len)))
+    plt.figure(figsize=(w_in, 3.6))
+    plt.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
+    x_full = np.concatenate([x_hist, x_fore])
+    y_full = np.concatenate([hist, np.asarray(targets_row, dtype=np.float64)])
+    plt.plot(x_full, y_full, color="C0", linewidth=1.2, label="Actual (context + future)", zorder=3)
+    plt.plot(x_fore, preds_row, color="C1", linewidth=1.0, label="Predicted", zorder=3)
+    plt.title(f"Window {window_idx} — {input_len}-step context + {pred_len}-step forecast")
+    plt.xlabel(f"Step index (0–{input_len - 1}: input context │ {input_len}–{input_len + pred_len - 1}: horizon)")
+    plt.ylabel(y_axis_label)
+    plt.legend(loc="upper left", fontsize=8)
+    plt.grid(True, alpha=0.35)
+    plt.tight_layout()
+    plt.savefig(path, dpi=dpi)
+    plt.close()
+
+
 def save_rolling_window_forecasts(
     output_dir,
     preds_raw,
@@ -415,6 +447,7 @@ def save_rolling_window_forecasts(
     save_plots=True,
     max_per_window_artifacts: Optional[int] = None,
     y_axis_label: str = "Value",
+    history_series_raw: Optional[np.ndarray] = None,
 ):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
@@ -461,18 +494,36 @@ def save_rolling_window_forecasts(
         all_rows.append(window_df)
 
         if save_plots and window_idx in save_indices:
-            plt.figure(figsize=(8, 3))
-            plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
-            plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
-            plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
-            plt.xlabel("Step Ahead")
-            plt.ylabel(y_axis_label)
-            plt.legend()
-            plt.grid(True)
-            plt.tight_layout()
             window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
-            plt.savefig(window_plot_path, dpi=140)
-            plt.close()
+            if history_series_raw is not None:
+                exp_len = preds_raw.shape[0] + input_len + pred_len - 1
+                if len(history_series_raw) < exp_len:
+                    raise ValueError(
+                        f"history_series_raw length {len(history_series_raw)} < required {exp_len} "
+                        f"for rolling plots (windows={preds_raw.shape[0]}, input_len={input_len}, pred_len={pred_len})."
+                    )
+                _plot_rolling_window_png(
+                    window_idx=window_idx,
+                    input_len=input_len,
+                    pred_len=pred_len,
+                    history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
+                    targets_row=np.asarray(window_df["actual"], dtype=np.float32),
+                    preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
+                    y_axis_label=y_axis_label,
+                    path=window_plot_path,
+                )
+            else:
+                plt.figure(figsize=(8, 3))
+                plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
+                plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
+                plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
+                plt.xlabel("Step Ahead")
+                plt.ylabel(y_axis_label)
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(window_plot_path, dpi=140)
+                plt.close()
 
     combined_df = pd.concat(all_rows, ignore_index=True)
     combined_csv_path = os.path.join(windows_dir, "all_windows_forecasts.csv")
@@ -496,17 +547,29 @@ def save_rolling_window_forecasts(
                 if os.path.isfile(window_plot_path):
                     continue
 
-                plt.figure(figsize=(8, 3))
-                plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
-                plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
-                plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
-                plt.xlabel("Step Ahead")
-                plt.ylabel(y_axis_label)
-                plt.legend()
-                plt.grid(True)
-                plt.tight_layout()
-                plt.savefig(window_plot_path, dpi=140)
-                plt.close()
+                if history_series_raw is not None:
+                    _plot_rolling_window_png(
+                        window_idx=int(window_df["window_index"].iloc[0]),
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
+                        targets_row=np.asarray(window_df["actual"], dtype=np.float32),
+                        preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
+                        y_axis_label=y_axis_label,
+                        path=window_plot_path,
+                    )
+                else:
+                    plt.figure(figsize=(8, 3))
+                    plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
+                    plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
+                    plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
+                    plt.xlabel("Step Ahead")
+                    plt.ylabel(y_axis_label)
+                    plt.legend()
+                    plt.grid(True)
+                    plt.tight_layout()
+                    plt.savefig(window_plot_path, dpi=140)
+                    plt.close()
 
             final_plot_count = len(
                 [name for name in os.listdir(plots_dir) if name.startswith("window_") and name.endswith(".png")]
@@ -892,6 +955,7 @@ def run_sweep(
         save_plots=args.save_window_plots,
         max_per_window_artifacts=args.rolling_window_artifact_limit,
         y_axis_label=args.value_column,
+        history_series_raw=test_series,
     )
 
     save_plot(

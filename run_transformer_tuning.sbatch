@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH -A prj0000000262
-#SBATCH -p h200p
+#SBATCH -p testqueue
 #SBATCH -N 1
 #SBATCH --gpus=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH -t 24:00:00
+#SBATCH -t 10:00:00
 #SBATCH -J transformer_tuning
 #SBATCH -o ~/logs/%x_%j.out
 #SBATCH -e ~/logs/%x_%j.err
