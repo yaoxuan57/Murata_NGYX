@@ -23,6 +23,13 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         default="Acceleration RMS (smoothed)",
         help="CSV column used as the univariate forecast target. Use 'Acceleration RMS' for raw (unsmoothed) CSVs.",
     )
+    parser.add_argument(
+        "--raw-compare-column",
+        type=str,
+        default="Acceleration RMS",
+        help="Optional raw (unsmoothed) CSV column to render as a second panel in rolling-window PNGs. "
+        "If missing, the extra panel is skipped.",
+    )
     parser.add_argument("--output-dir", type=str, default=default_output_dir)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -414,6 +421,8 @@ def _plot_rolling_window_png(
     preds_row: np.ndarray,
     y_axis_label: str,
     path: str,
+    raw_compare_series: Optional[np.ndarray] = None,
+    raw_compare_label: str = "Acceleration RMS",
     dpi: int = 140,
 ):
     """Context = last input_len actual points before forecast; right = forecast actual vs predicted."""
@@ -421,20 +430,50 @@ def _plot_rolling_window_png(
     x_hist = np.arange(0, input_len, dtype=np.float64)
     x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
     w_in = max(10.0, min(22.0, 6.0 + 0.004 * float(input_len + pred_len)))
-    plt.figure(figsize=(w_in, 3.6))
-    plt.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
+    use_raw_panel = raw_compare_series is not None
+    if use_raw_panel:
+        fig, axes = plt.subplots(2, 1, figsize=(w_in, 6.0), sharex=True, gridspec_kw={"hspace": 0.12})
+        ax_top, ax_bottom = axes
+    else:
+        fig, ax_top = plt.subplots(1, 1, figsize=(w_in, 3.6))
+        ax_bottom = None
+
+    ax_top.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
     x_full = np.concatenate([x_hist, x_fore])
     y_full = np.concatenate([hist, np.asarray(targets_row, dtype=np.float64)])
-    plt.plot(x_full, y_full, color="C0", linewidth=1.2, label="Actual (context + future)", zorder=3)
-    plt.plot(x_fore, preds_row, color="C1", linewidth=1.0, label="Predicted", zorder=3)
-    plt.title(f"Window {window_idx} — {input_len}-step context + {pred_len}-step forecast")
-    plt.xlabel(f"Step index (0–{input_len - 1}: input context │ {input_len}–{input_len + pred_len - 1}: horizon)")
-    plt.ylabel(y_axis_label)
-    plt.legend(loc="upper left", fontsize=8)
-    plt.grid(True, alpha=0.35)
-    plt.tight_layout()
-    plt.savefig(path, dpi=dpi)
-    plt.close()
+    ax_top.plot(x_full, y_full, color="C0", linewidth=1.2, label="Actual (smoothed: context + future)", zorder=3)
+    ax_top.plot(x_fore, preds_row, color="C1", linewidth=1.0, label="Predicted", zorder=3)
+    ax_top.set_title(f"Window {window_idx} — {input_len}-step context + {pred_len}-step forecast")
+    ax_top.set_ylabel(y_axis_label)
+    ax_top.legend(loc="upper left", fontsize=8)
+    ax_top.grid(True, alpha=0.35)
+
+    if use_raw_panel and ax_bottom is not None:
+        raw_hist = np.asarray(raw_compare_series[window_idx : window_idx + input_len], dtype=np.float64)
+        raw_future = np.asarray(
+            raw_compare_series[window_idx + input_len : window_idx + input_len + pred_len],
+            dtype=np.float64,
+        )
+        raw_full = np.concatenate([raw_hist, raw_future])
+        ax_bottom.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
+        ax_bottom.plot(
+            x_full,
+            raw_full,
+            color="tab:green",
+            linewidth=1.1,
+            label="Actual (raw: context + future)",
+            zorder=3,
+        )
+        ax_bottom.set_ylabel(raw_compare_label)
+        ax_bottom.legend(loc="upper left", fontsize=8)
+        ax_bottom.grid(True, alpha=0.35)
+
+    (ax_bottom if ax_bottom is not None else ax_top).set_xlabel(
+        f"Step index (0-{input_len - 1}: input context | {input_len}-{input_len + pred_len - 1}: horizon)"
+    )
+    fig.tight_layout()
+    fig.savefig(path, dpi=dpi)
+    plt.close(fig)
 
 
 def save_rolling_window_forecasts(
@@ -448,6 +487,8 @@ def save_rolling_window_forecasts(
     max_per_window_artifacts: Optional[int] = None,
     y_axis_label: str = "Value",
     history_series_raw: Optional[np.ndarray] = None,
+    raw_compare_series: Optional[np.ndarray] = None,
+    raw_compare_label: str = "Acceleration RMS",
 ):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
@@ -511,6 +552,10 @@ def save_rolling_window_forecasts(
                     preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
                     y_axis_label=y_axis_label,
                     path=window_plot_path,
+                    raw_compare_series=np.asarray(raw_compare_series, dtype=np.float32)
+                    if raw_compare_series is not None
+                    else None,
+                    raw_compare_label=raw_compare_label,
                 )
             else:
                 plt.figure(figsize=(8, 3))
@@ -557,6 +602,10 @@ def save_rolling_window_forecasts(
                         preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
                         y_axis_label=y_axis_label,
                         path=window_plot_path,
+                        raw_compare_series=np.asarray(raw_compare_series, dtype=np.float32)
+                        if raw_compare_series is not None
+                        else None,
+                        raw_compare_label=raw_compare_label,
                     )
                 else:
                     plt.figure(figsize=(8, 3))
@@ -609,6 +658,14 @@ def run_sweep(
 
     tv_series = df_train_val[vc].to_numpy(dtype=np.float32)
     test_series = df_test[vc].to_numpy(dtype=np.float32)
+    raw_compare_series = None
+    if args.raw_compare_column in df_test.columns:
+        raw_compare_series = df_test[args.raw_compare_column].to_numpy(dtype=np.float32)
+    else:
+        print(
+            f"Raw compare column {args.raw_compare_column!r} not found in test CSV; "
+            "rolling PNGs will include only the smoothed panel."
+        )
 
     print(f"Train+Val series length : {len(tv_series)}")
     print(f"Test series length      : {len(test_series)}")
@@ -956,6 +1013,8 @@ def run_sweep(
         max_per_window_artifacts=args.rolling_window_artifact_limit,
         y_axis_label=args.value_column,
         history_series_raw=test_series,
+        raw_compare_series=raw_compare_series,
+        raw_compare_label=args.raw_compare_column,
     )
 
     save_plot(
