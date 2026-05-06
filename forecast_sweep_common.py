@@ -668,7 +668,7 @@ def run_sweep(
             )
 
     if args.use_all_numeric_features:
-        ignore_cols = {"TIMESTAMP"}
+        ignore_cols = {"TIMESTAMP", "Acceleration RMS (smoothed)"}
         feature_cols = [c for c in df_train_val.columns if c not in ignore_cols and pd.api.types.is_numeric_dtype(df_train_val[c])]
     elif args.feature_columns:
         feature_cols = list(args.feature_columns)
