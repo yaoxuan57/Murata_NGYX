@@ -24,6 +24,25 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         help="CSV column used as the univariate forecast target. Use 'Acceleration RMS' for raw (unsmoothed) CSVs.",
     )
     parser.add_argument(
+        "--feature-columns",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Input feature columns. If omitted, uses only --value-column.",
+    )
+    parser.add_argument(
+        "--use-all-numeric-features",
+        dest="use_all_numeric_features",
+        action="store_true",
+        help="Use all numeric columns except TIMESTAMP as input features.",
+    )
+    parser.add_argument(
+        "--no-use-all-numeric-features",
+        dest="use_all_numeric_features",
+        action="store_false",
+    )
+    parser.set_defaults(use_all_numeric_features=False)
+    parser.add_argument(
         "--raw-compare-column",
         type=str,
         default="Acceleration RMS",
@@ -192,36 +211,42 @@ def parse_timestamp_series(series: pd.Series, name: str) -> pd.Series:
 
 
 class MultiStepDeltaDataset(Dataset):
-    def __init__(self, series_norm, input_len, pred_len):
-        series_norm = np.asarray(series_norm, dtype=np.float32)
+    def __init__(self, features_norm, target_norm, input_len, pred_len):
+        features_norm = np.asarray(features_norm, dtype=np.float32)
+        target_norm = np.asarray(target_norm, dtype=np.float32)
+        if features_norm.ndim != 2:
+            raise ValueError(f"features_norm must be 2D (time, n_features), got shape={features_norm.shape}")
+        if target_norm.ndim != 1:
+            raise ValueError(f"target_norm must be 1D (time,), got shape={target_norm.shape}")
+        if len(features_norm) != len(target_norm):
+            raise ValueError("features_norm and target_norm must have identical time length.")
         self.input_len = input_len
         self.pred_len = pred_len
-        self.n_samples = len(series_norm) - input_len - pred_len + 1
+        self.n_samples = len(target_norm) - input_len - pred_len + 1
 
         if self.n_samples <= 0:
             raise ValueError("Series too short for given input_len and pred_len.")
 
-        x = np.array(
-            [series_norm[i:i + input_len] for i in range(self.n_samples)],
-            dtype=np.float32,
-        )[:, np.newaxis, :]
+        x = np.array([features_norm[i:i + input_len, :] for i in range(self.n_samples)], dtype=np.float32)
+        x = np.transpose(x, (0, 2, 1))
 
         future = np.array(
-            [series_norm[i + input_len:i + input_len + pred_len] for i in range(self.n_samples)],
+            [target_norm[i + input_len:i + input_len + pred_len] for i in range(self.n_samples)],
             dtype=np.float32,
         )
 
-        last_val = x[:, 0, -1][:, None]
+        last_val = np.array([target_norm[i + input_len - 1] for i in range(self.n_samples)], dtype=np.float32)[:, None]
         y_delta = future - last_val
 
         self.x = torch.tensor(x, dtype=torch.float32)
         self.y = torch.tensor(y_delta, dtype=torch.float32)
+        self.last_val = torch.tensor(last_val, dtype=torch.float32)
 
     def __len__(self):
         return len(self.x)
 
     def __getitem__(self, idx):
-        return self.x[idx], self.y[idx]
+        return self.x[idx], self.y[idx], self.last_val[idx]
 
 
 class TrajectoryAwareLoss(nn.Module):
@@ -296,12 +321,12 @@ def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
     total_count = 0
 
     with torch.set_grad_enabled(training):
-        for x, y_delta in loader:
+        for x, y_delta, last_val in loader:
             x = x.to(device)
             y_delta = y_delta.to(device)
+            last_val = last_val.to(device)
 
             pred_delta = model(x)
-            last_val = x[:, 0, -1].unsqueeze(1)
             pred_abs = pred_delta + last_val
             true_abs = y_delta + last_val
             loss = criterion(pred_abs, true_abs)
@@ -325,12 +350,12 @@ def collect_predictions(model, loader, train_std, train_mean, device):
 
     model.eval()
     with torch.no_grad():
-        for x, y_delta in loader:
+        for x, y_delta, last_val in loader:
             x = x.to(device)
             y_delta = y_delta.to(device)
+            last_val = last_val.to(device)
 
             pred_delta = model(x)
-            last_val = x[:, 0, -1].unsqueeze(1)
 
             pred_abs_norm = pred_delta + last_val
             true_abs_norm = y_delta + last_val
@@ -356,13 +381,12 @@ def baseline_rmse(test_loader, pred_len, train_std, train_mean):
     baseline_preds_abs_norm = []
     baseline_targets_abs_norm = []
 
-    for x, y_delta in test_loader:
-        x_np = x.numpy()
+    for x, y_delta, last_val in test_loader:
         y_delta_np = y_delta.numpy()
+        last_val_np = last_val.numpy()
 
-        last_val = x_np[:, 0, -1][:, None]
-        pred_abs_norm = np.repeat(last_val, pred_len, axis=1)
-        true_abs_norm = y_delta_np + last_val
+        pred_abs_norm = np.repeat(last_val_np, pred_len, axis=1)
+        true_abs_norm = y_delta_np + last_val_np
 
         baseline_preds_abs_norm.append(pred_abs_norm)
         baseline_targets_abs_norm.append(true_abs_norm)
@@ -416,61 +440,52 @@ def _plot_rolling_window_png(
     window_idx: int,
     input_len: int,
     pred_len: int,
+    input_feature_series_raw: Optional[np.ndarray],
+    input_feature_names: Optional[list],
     history_series_raw: np.ndarray,
     targets_row: np.ndarray,
     preds_row: np.ndarray,
     y_axis_label: str,
     path: str,
-    raw_compare_series: Optional[np.ndarray] = None,
-    raw_compare_label: str = "Acceleration RMS",
     dpi: int = 140,
 ):
-    """Context = last input_len actual points before forecast; right = forecast actual vs predicted."""
+    """Single-panel plot: left input-feature context, right target forecast actual vs predicted."""
     hist = np.asarray(history_series_raw[window_idx : window_idx + input_len], dtype=np.float64)
     x_hist = np.arange(0, input_len, dtype=np.float64)
     x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
     w_in = max(10.0, min(22.0, 6.0 + 0.004 * float(input_len + pred_len)))
-    use_raw_panel = raw_compare_series is not None
-    if use_raw_panel:
-        fig, axes = plt.subplots(2, 1, figsize=(w_in, 6.0), sharex=True, gridspec_kw={"hspace": 0.12})
-        ax_top, ax_bottom = axes
+    fig, ax_left = plt.subplots(1, 1, figsize=(w_in, 3.8))
+    ax_right = ax_left.twinx()
+
+    ax_left.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
+    if input_feature_series_raw is not None and input_feature_names is not None and len(input_feature_names) > 0:
+        feature_ctx = np.asarray(input_feature_series_raw[window_idx : window_idx + input_len, :], dtype=np.float64)
+        n_feat = feature_ctx.shape[1]
+        for j in range(n_feat):
+            vec = feature_ctx[:, j]
+            vstd = vec.std()
+            norm = (vec - vec.mean()) / (vstd + 1e-8)
+            label = input_feature_names[j] if j < len(input_feature_names) else f"feature_{j}"
+            ax_left.plot(x_hist, norm, linewidth=0.8, alpha=0.6, label=f"Input: {label}", zorder=2)
     else:
-        fig, ax_top = plt.subplots(1, 1, figsize=(w_in, 3.6))
-        ax_bottom = None
+        vec = hist
+        vstd = vec.std()
+        norm = (vec - vec.mean()) / (vstd + 1e-8)
+        ax_left.plot(x_hist, norm, linewidth=0.9, alpha=0.7, label="Input context (normalized)", zorder=2)
 
-    ax_top.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
-    x_full = np.concatenate([x_hist, x_fore])
-    y_full = np.concatenate([hist, np.asarray(targets_row, dtype=np.float64)])
-    ax_top.plot(x_full, y_full, color="C0", linewidth=1.2, label="Actual (smoothed: context + future)", zorder=3)
-    ax_top.plot(x_fore, preds_row, color="C1", linewidth=1.0, label="Predicted", zorder=3)
-    ax_top.set_title(f"Window {window_idx} — {input_len}-step context + {pred_len}-step forecast")
-    ax_top.set_ylabel(y_axis_label)
-    ax_top.legend(loc="upper left", fontsize=8)
-    ax_top.grid(True, alpha=0.35)
-
-    if use_raw_panel and ax_bottom is not None:
-        raw_hist = np.asarray(raw_compare_series[window_idx : window_idx + input_len], dtype=np.float64)
-        raw_future = np.asarray(
-            raw_compare_series[window_idx + input_len : window_idx + input_len + pred_len],
-            dtype=np.float64,
-        )
-        raw_full = np.concatenate([raw_hist, raw_future])
-        ax_bottom.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
-        ax_bottom.plot(
-            x_full,
-            raw_full,
-            color="tab:green",
-            linewidth=1.1,
-            label="Actual (raw: context + future)",
-            zorder=3,
-        )
-        ax_bottom.set_ylabel(raw_compare_label)
-        ax_bottom.legend(loc="upper left", fontsize=8)
-        ax_bottom.grid(True, alpha=0.35)
-
-    (ax_bottom if ax_bottom is not None else ax_top).set_xlabel(
+    ax_right.plot(x_fore, targets_row, color="C0", linewidth=1.3, label="Actual target", zorder=4)
+    ax_right.plot(x_fore, preds_row, color="C1", linewidth=1.1, label="Predicted target", zorder=4)
+    ax_left.set_title(f"Window {window_idx} — input context + target forecast ({pred_len}-step)")
+    ax_left.set_ylabel("Input features (per-feature z-score)")
+    ax_right.set_ylabel(y_axis_label)
+    ax_left.set_xlabel(
         f"Step index (0-{input_len - 1}: input context | {input_len}-{input_len + pred_len - 1}: horizon)"
     )
+    ax_left.grid(True, alpha=0.35)
+    h1, l1 = ax_left.get_legend_handles_labels()
+    h2, l2 = ax_right.get_legend_handles_labels()
+    max_left_legend = min(len(h1), 8)
+    ax_left.legend(h1[:max_left_legend] + h2, l1[:max_left_legend] + l2, loc="upper left", fontsize=7)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
@@ -487,8 +502,8 @@ def save_rolling_window_forecasts(
     max_per_window_artifacts: Optional[int] = None,
     y_axis_label: str = "Value",
     history_series_raw: Optional[np.ndarray] = None,
-    raw_compare_series: Optional[np.ndarray] = None,
-    raw_compare_label: str = "Acceleration RMS",
+    input_feature_series_raw: Optional[np.ndarray] = None,
+    input_feature_names: Optional[list] = None,
 ):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
@@ -547,15 +562,13 @@ def save_rolling_window_forecasts(
                     window_idx=window_idx,
                     input_len=input_len,
                     pred_len=pred_len,
+                    input_feature_series_raw=input_feature_series_raw,
+                    input_feature_names=input_feature_names,
                     history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
                     targets_row=np.asarray(window_df["actual"], dtype=np.float32),
                     preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
                     y_axis_label=y_axis_label,
                     path=window_plot_path,
-                    raw_compare_series=np.asarray(raw_compare_series, dtype=np.float32)
-                    if raw_compare_series is not None
-                    else None,
-                    raw_compare_label=raw_compare_label,
                 )
             else:
                 plt.figure(figsize=(8, 3))
@@ -597,15 +610,13 @@ def save_rolling_window_forecasts(
                         window_idx=int(window_df["window_index"].iloc[0]),
                         input_len=input_len,
                         pred_len=pred_len,
+                        input_feature_series_raw=input_feature_series_raw,
+                        input_feature_names=input_feature_names,
                         history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
                         targets_row=np.asarray(window_df["actual"], dtype=np.float32),
                         preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
                         y_axis_label=y_axis_label,
                         path=window_plot_path,
-                        raw_compare_series=np.asarray(raw_compare_series, dtype=np.float32)
-                        if raw_compare_series is not None
-                        else None,
-                        raw_compare_label=raw_compare_label,
                     )
                 else:
                     plt.figure(figsize=(8, 3))
@@ -656,16 +667,32 @@ def run_sweep(
                 f"Columns: {list(frame.columns)}. Pass --value-column with an existing column name."
             )
 
+    if args.use_all_numeric_features:
+        ignore_cols = {"TIMESTAMP"}
+        feature_cols = [c for c in df_train_val.columns if c not in ignore_cols and pd.api.types.is_numeric_dtype(df_train_val[c])]
+    elif args.feature_columns:
+        feature_cols = list(args.feature_columns)
+    else:
+        feature_cols = [vc]
+    for label, frame, csv_path in (
+        ("train_val", df_train_val, args.train_val_csv),
+        ("test", df_test, args.test_csv),
+    ):
+        missing = [c for c in feature_cols if c not in frame.columns]
+        if missing:
+            raise ValueError(
+                f"Feature columns missing in {label} CSV {csv_path!r}: {missing}. "
+                f"Available columns: {list(frame.columns)}"
+            )
     tv_series = df_train_val[vc].to_numpy(dtype=np.float32)
     test_series = df_test[vc].to_numpy(dtype=np.float32)
-    raw_compare_series = None
-    if args.raw_compare_column in df_test.columns:
-        raw_compare_series = df_test[args.raw_compare_column].to_numpy(dtype=np.float32)
-    else:
-        print(
-            f"Raw compare column {args.raw_compare_column!r} not found in test CSV; "
-            "rolling PNGs will include only the smoothed panel."
-        )
+    tv_features = df_train_val[feature_cols].to_numpy(dtype=np.float32)
+    test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
+    n_features = int(tv_features.shape[1])
+    setattr(args, "input_dim", n_features)
+    setattr(args, "feature_columns_resolved", feature_cols)
+    print(f"Target column: {vc}")
+    print(f"Input feature columns ({n_features}): {feature_cols}")
 
     print(f"Train+Val series length : {len(tv_series)}")
     print(f"Test series length      : {len(test_series)}")
@@ -674,8 +701,13 @@ def run_sweep(
     train_mean = tv_series[:train_end_idx].mean()
     train_std = tv_series[:train_end_idx].std() + 1e-8
 
-    tv_norm = (tv_series - train_mean) / train_std
-    test_norm = (test_series - train_mean) / train_std
+    feat_train = tv_features[:train_end_idx]
+    feat_mean = feat_train.mean(axis=0)
+    feat_std = feat_train.std(axis=0) + 1e-8
+    tv_feat_norm = (tv_features - feat_mean) / feat_std
+    test_feat_norm = (test_features - feat_mean) / feat_std
+    tv_target_norm = (tv_series - train_mean) / train_std
+    test_target_norm = (test_series - train_mean) / train_std
 
     print(f"train_mean: {train_mean:.6f}")
     print(f"train_std : {train_std:.6f}")
@@ -685,8 +717,8 @@ def run_sweep(
     for input_len in args.input_lens:
         for pred_len in args.pred_lens:
             try:
-                tv_dataset = MultiStepDeltaDataset(tv_norm, input_len=input_len, pred_len=pred_len)
-                test_dataset = MultiStepDeltaDataset(test_norm, input_len=input_len, pred_len=pred_len)
+                tv_dataset = MultiStepDeltaDataset(tv_feat_norm, tv_target_norm, input_len=input_len, pred_len=pred_len)
+                test_dataset = MultiStepDeltaDataset(test_feat_norm, test_target_norm, input_len=input_len, pred_len=pred_len)
 
                 n_tv = len(tv_dataset)
                 n_train = int(n_tv * (1 - args.val_ratio))
@@ -781,11 +813,11 @@ def run_sweep(
                 horizon_rmse = [rmse_np(all_targets_raw[:, h], all_preds_raw[:, h]) for h in range(pred_len)]
 
                 sample_idx = min(args.plot_sample_idx, len(test_dataset) - 1)
-                x, y_delta = test_dataset[sample_idx]
+                x, y_delta, last_val = test_dataset[sample_idx]
                 with torch.no_grad():
                     pred_delta = model(x.unsqueeze(0).to(device)).cpu().numpy()[0]
 
-                last_val = x.numpy()[0, -1]
+                last_val = float(last_val.numpy()[0])
                 pred_raw = (pred_delta + last_val) * train_std + train_mean
                 true_raw = (y_delta.numpy() + last_val) * train_std + train_mean
                 if args.pred_smoothing_window > 1:
@@ -888,6 +920,8 @@ def run_sweep(
         "train_val_csv": args.train_val_csv,
         "test_csv": args.test_csv,
         "value_column": args.value_column,
+        "feature_columns": args.feature_columns_resolved,
+        "use_all_numeric_features": bool(args.use_all_numeric_features),
         "output_dir": args.output_dir,
         "seed": args.seed,
         "batch_size": args.batch_size,
@@ -1013,8 +1047,8 @@ def run_sweep(
         max_per_window_artifacts=args.rolling_window_artifact_limit,
         y_axis_label=args.value_column,
         history_series_raw=test_series,
-        raw_compare_series=raw_compare_series,
-        raw_compare_label=args.raw_compare_column,
+        input_feature_series_raw=test_features,
+        input_feature_names=feature_cols,
     )
 
     save_plot(

@@ -12,6 +12,7 @@ class DLinearForecaster(nn.Module):
         self,
         input_len,
         pred_len,
+        input_dim=1,
         kernel_size=25,
         use_residual_head=True,
         residual_hidden=128,
@@ -21,9 +22,11 @@ class DLinearForecaster(nn.Module):
         super().__init__()
         self.input_len = input_len
         self.pred_len = pred_len
+        self.input_dim = input_dim
         self.kernel_size = kernel_size if kernel_size % 2 == 1 else kernel_size + 1
         self.use_residual_head = use_residual_head
         self.residual_weight = residual_weight
+        self.channel_mixer = nn.Conv1d(input_dim, 1, kernel_size=1, bias=False)
 
         self.linear_trend = nn.Linear(input_len, pred_len)
         self.linear_seasonal = nn.Linear(input_len, pred_len)
@@ -42,6 +45,7 @@ class DLinearForecaster(nn.Module):
         nn.init.constant_(self.linear_trend.bias, 0.0)
         nn.init.constant_(self.linear_seasonal.weight, 0.0)
         nn.init.constant_(self.linear_seasonal.bias, 0.0)
+        nn.init.constant_(self.channel_mixer.weight, 1.0 / max(input_dim, 1))
 
     def moving_average(self, seq):
         pad = self.kernel_size // 2
@@ -50,7 +54,7 @@ class DLinearForecaster(nn.Module):
         return trend.squeeze(1)
 
     def forward(self, x):
-        seq = x[:, 0, :]
+        seq = self.channel_mixer(x).squeeze(1)
         trend = self.moving_average(seq)
         seasonal = seq - trend
 
@@ -66,6 +70,7 @@ def make_model(input_len, pred_len, args, device):
     return DLinearForecaster(
         input_len=input_len,
         pred_len=pred_len,
+        input_dim=getattr(args, "input_dim", 1),
         kernel_size=args.kernel_size,
         use_residual_head=args.use_residual_head,
         residual_hidden=args.residual_hidden,
@@ -79,6 +84,7 @@ def make_model_config(args, input_len, pred_len):
         "model_type": "dlinear",
         "input_len": input_len,
         "pred_len": pred_len,
+        "input_dim": getattr(args, "input_dim", 1),
         "kernel_size": args.kernel_size,
         "use_residual_head": args.use_residual_head,
         "residual_hidden": args.residual_hidden,

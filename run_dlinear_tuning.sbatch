@@ -17,6 +17,7 @@ mkdir -p ~/logs
 
 COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288"
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
+COMMON_FEATURES="--value-column Acceleration RMS --use-all-numeric-features"
 # Per-window rolling CSV/PNG under rolling_window_forecasts/ (full series still in all_windows_forecasts.csv).
 ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
 COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}"
@@ -59,11 +60,11 @@ if [ "${USE_MOE}" = "1" ]; then
     echo "Running MoE tuning with ${MOE_NUM_EXPERTS} experts -> ${RUN_TAG}"
 
     # 1) Run candidate configs and save window plots for each candidate.
-    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4_moe${MOE_NUM_EXPERTS}"
-    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1296_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
-    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
-    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
-    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
+    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4_moe${MOE_NUM_EXPERTS}"
+    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1296_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
+    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
+    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
+    python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_k11_lr2e4_moe${MOE_NUM_EXPERTS}"
 
     # 2) Rank all candidate runs and store best config summary.
     python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
@@ -77,7 +78,8 @@ if [ "${USE_MOE}" = "1" ]; then
       --test-csv "${TEST_CSV}" \
       ${COMMON_ROLLING} \
       ${COMMON_TRAIN} \
-      ${COMMON_LOSS}
+      ${COMMON_LOSS} \
+      ${COMMON_FEATURES}
 
     python -u select_best_sweep_run.py --runs-root "${BEST}" --out-json "best_model_selection.json"
 
@@ -98,11 +100,11 @@ else
   mkdir -p "${RUNS}" "${BEST}"
 
   # 1) Run candidate configs and save window plots for each candidate.
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4"
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_k11_lr5e4"
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_k11_lr2e4"
-  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_k11_lr2e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_k11_lr5e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_k11_lr2e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_k11_lr2e4"
+  python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_k11_lr2e4"
 
   # 2) Rank all candidate runs and store best config summary.
   python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
@@ -116,7 +118,8 @@ else
     --test-csv "${TEST_CSV}" \
     ${COMMON_ROLLING} \
     ${COMMON_TRAIN} \
-    ${COMMON_LOSS}
+    ${COMMON_LOSS} \
+    ${COMMON_FEATURES}
 
   python -u select_best_sweep_run.py --runs-root "${BEST}" --out-json "best_model_selection.json"
 

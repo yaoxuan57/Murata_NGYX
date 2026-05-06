@@ -17,6 +17,7 @@ mkdir -p ~/logs
 
 COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288"
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
+COMMON_FEATURES="--value-column Acceleration RMS --use-all-numeric-features"
 ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
 COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}"
 
@@ -42,11 +43,11 @@ RUNS="${ROOT}/runs"
 BEST="${ROOT}/best_model"
 mkdir -p "${RUNS}" "${BEST}"
 
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --d-model 128 --nhead 8 --num-layers 4 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_d128_h8_l4_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --d-model 128 --nhead 8 --num-layers 5 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_d128_h8_l5_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --d-model 160 --nhead 8 --num-layers 5 --dim-feedforward 320 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_d160_h8_l5_lr2e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_d192_h8_l6_lr2e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_d192_h8_l6_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --d-model 128 --nhead 8 --num-layers 4 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_d128_h8_l4_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --d-model 128 --nhead 8 --num-layers 5 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_d128_h8_l5_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --d-model 160 --nhead 8 --num-layers 5 --dim-feedforward 320 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_d160_h8_l5_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_d192_h8_l6_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} ${COMMON_FEATURES} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_d192_h8_l6_lr2e4"
 
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
 
@@ -58,7 +59,8 @@ python -u rerun_best_sweep_with_plots.py \
   --test-csv "${TEST_CSV}" \
   ${COMMON_ROLLING} \
   ${COMMON_TRAIN} \
-  ${COMMON_LOSS}
+  ${COMMON_LOSS} \
+  ${COMMON_FEATURES}
 
 python -u select_best_sweep_run.py --runs-root "${BEST}" --out-json "best_model_selection.json"
 

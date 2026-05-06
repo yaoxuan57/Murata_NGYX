@@ -50,7 +50,7 @@ class TransformerForecastDelta(nn.Module):
 def make_model(input_len, pred_len, args, device):
     return TransformerForecastDelta(
         seq_len=input_len,
-        input_dim=1,
+        input_dim=getattr(args, "input_dim", 1),
         pred_len=pred_len,
         d_model=args.d_model,
         nhead=args.nhead,
@@ -65,6 +65,7 @@ def make_model_config(args, input_len, pred_len):
         "model_type": "transformer",
         "input_len": input_len,
         "pred_len": pred_len,
+        "input_dim": getattr(args, "input_dim", 1),
         "d_model": args.d_model,
         "nhead": args.nhead,
         "num_layers": args.num_layers,

@@ -129,6 +129,12 @@ def main():
     value_column = best_config.get("value_column")
     if value_column is not None:
         cmd.extend(["--value-column", str(value_column)])
+    feature_columns = best_config.get("feature_columns")
+    if isinstance(feature_columns, list) and len(feature_columns) > 0:
+        cmd.append("--feature-columns")
+        cmd.extend([str(c) for c in feature_columns])
+    if bool(best_config.get("use_all_numeric_features", False)):
+        cmd.append("--use-all-numeric-features")
     cmd.extend(model_config_to_flags(model_config))
     cmd.extend(["--output-dir", out_dir])
 
