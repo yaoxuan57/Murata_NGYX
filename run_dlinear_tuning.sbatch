@@ -15,8 +15,11 @@ set -euo pipefail
 
 mkdir -p ~/logs
 
+# Uniform-step window filter (5-min cadence by default; override via env, e.g. UNIFORM_STEP_SECONDS=1800).
+UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-300}
+UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-30}
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
-COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1"
+COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
 TARGET_COLUMN=${TARGET_COLUMN:-"Acceleration RMS"}
 # Per-window rolling CSV/PNG under rolling_window_forecasts/ (full series still in all_windows_forecasts.csv).

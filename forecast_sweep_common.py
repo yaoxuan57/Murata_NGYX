@@ -285,6 +285,37 @@ def parse_timestamp_series(series: pd.Series, name: str) -> pd.Series:
     return parsed
 
 
+def summarize_timestamp_steps(
+    timestamps: pd.Series,
+    label: str,
+    nominal_seconds: float,
+    tolerance_seconds: float,
+) -> None:
+    """Print a short summary of inter-row TIMESTAMP gaps.
+
+    Helps diagnose why a uniform-timestep window filter accepts/rejects rows.
+    Reports median/mean/min/max step (seconds) and the share of consecutive
+    pairs whose step lies within ``nominal_seconds ± tolerance_seconds``.
+    """
+    ts = pd.Series(timestamps).reset_index(drop=True)
+    if len(ts) < 2:
+        print(f"  [step-stats:{label}] not enough rows for diff stats (n={len(ts)}).")
+        return
+    diffs_s = np.diff(ts.to_numpy(dtype="datetime64[ns]").astype("int64")) / 1e9
+    nominal = float(nominal_seconds)
+    tol = float(tolerance_seconds)
+    pct_within = 100.0 * float(np.mean(np.abs(diffs_s - nominal) <= tol))
+    try:
+        mode_val = float(pd.Series(np.round(diffs_s, 3)).mode().iloc[0])
+    except Exception:
+        mode_val = float("nan")
+    print(
+        f"  [step-stats:{label}] median={np.median(diffs_s):.3f}s mode={mode_val:.3f}s "
+        f"mean={diffs_s.mean():.3f}s min={diffs_s.min():.3f}s max={diffs_s.max():.3f}s | "
+        f"pairs within {nominal:g}±{tol:g}s = {pct_within:.2f}% (n_diffs={diffs_s.size})"
+    )
+
+
 def compute_uniform_timestep_start_indices(
     timestamps: pd.Series,
     span_len: int,
@@ -1004,6 +1035,35 @@ def run_sweep(
             f"Uniform timestep windows: nominal step {args.uniform_step_seconds}s "
             f"(±{args.uniform_step_tolerance_seconds}s per adjacent pair)."
         )
+        if single_file_mode:
+            summarize_timestamp_steps(
+                df_all["TIMESTAMP"],
+                "single",
+                args.uniform_step_seconds,
+                args.uniform_step_tolerance_seconds,
+            )
+        elif explicit_tv:
+            summarize_timestamp_steps(
+                df_train["TIMESTAMP"], "train",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_val["TIMESTAMP"], "val",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_test["TIMESTAMP"], "test",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+        else:
+            summarize_timestamp_steps(
+                df_train_val["TIMESTAMP"], "train_val",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_test["TIMESTAMP"], "test",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
 
     if single_file_mode:
         train_mean = float("nan")
@@ -1056,6 +1116,16 @@ def run_sweep(
                             f"  Single CSV uniform windows: {len(all_valid)}/{n_slide} valid starts "
                             f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
                         )
+                        if len(all_valid) == 0 and n_slide > 0:
+                            print(
+                                "  [hint] 0 valid uniform-step windows. The data sampling rate likely "
+                                "does not match --uniform-step-seconds. Inspect the [step-stats:single] "
+                                "line above (median/mode = the most common gap in seconds) and either "
+                                "pass --uniform-step-seconds <observed_step> "
+                                "(e.g. --uniform-step-seconds 1800 for 30-min cadence), widen "
+                                "--uniform-step-tolerance-seconds, or pass "
+                                "--no-require-uniform-timestep to disable the filter."
+                            )
                     else:
                         n_slide = max(0, T - span + 1)
                         all_valid = np.arange(n_slide, dtype=np.int64) if n_slide > 0 else np.zeros(0, dtype=np.int64)
