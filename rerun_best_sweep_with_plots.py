@@ -23,11 +23,22 @@ def parse_args():
     parser.add_argument(
         "--pred-smoothing-window",
         type=int,
-        default=11,
-        help="Passed to train script; 1 disables post-smoothing of test forecasts.",
+        default=1,
+        help="Passed to train script; 1 disables post-smoothing (default).",
     )
+    parser.add_argument("--train-csv", type=str, default=None, help="With --val-csv, explicit 3-way split.")
+    parser.add_argument("--val-csv", type=str, default=None)
     parser.add_argument("--train-val-csv", type=str, default=None)
     parser.add_argument("--test-csv", type=str, default=None)
+    parser.add_argument(
+        "--single-csv",
+        type=str,
+        default=None,
+        help="Override or set path for runs that used --single-csv.",
+    )
+    parser.add_argument("--train-ratio", type=float, default=None)
+    parser.add_argument("--val-ratio", type=float, default=None)
+    parser.add_argument("--test-ratio", type=float, default=None)
     parser.add_argument(
         "--rolling-window-artifact-limit",
         type=int,
@@ -59,6 +70,8 @@ def model_config_to_flags(model_config):
 
 def main():
     args = parse_args()
+    if (args.train_csv is None) ^ (args.val_csv is None):
+        raise SystemExit("Provide both --train-csv and --val-csv or neither.")
 
     with open(args.selection_json, "r", encoding="utf-8") as fp:
         best = json.load(fp)
@@ -92,13 +105,65 @@ def main():
         "--input-lens",
         str(input_len),
     ]
-    if args.train_val_csv is not None:
-        cmd.extend(["--train-val-csv", args.train_val_csv])
-    if args.test_csv is not None:
-        cmd.extend(["--test-csv", args.test_csv])
+    explicit_cfg = best_config.get("data_split_mode") == "explicit_train_val_test"
+    single_cfg = best_config.get("data_split_mode") == "single_csv_window_ratios"
+    cli_explicit = args.train_csv is not None and args.val_csv is not None
+    single_path = args.single_csv or (best_config.get("single_csv") if single_cfg else None)
+
+    if cli_explicit:
+        cmd.extend(["--train-csv", args.train_csv, "--val-csv", args.val_csv])
+        test_p = args.test_csv or best_config.get("test_csv")
+        if test_p:
+            cmd.extend(["--test-csv", str(test_p)])
+    elif single_path:
+        cmd.extend(["--single-csv", str(single_path)])
+        tr = (
+            args.train_ratio
+            if args.train_ratio is not None
+            else best_config.get("train_ratio_window")
+        )
+        va = (
+            args.val_ratio
+            if args.val_ratio is not None
+            else best_config.get("val_ratio_window")
+        )
+        te = (
+            args.test_ratio
+            if args.test_ratio is not None
+            else best_config.get("test_ratio_window")
+        )
+        if tr is not None:
+            cmd.extend(["--train-ratio", str(tr)])
+        if va is not None:
+            cmd.extend(["--val-ratio", str(va)])
+        if te is not None:
+            cmd.extend(["--test-ratio", str(te)])
+        mw = best_config.get("min_windows_per_split")
+        if mw is not None:
+            cmd.extend(["--min-windows-per-split", str(int(mw))])
+    elif explicit_cfg and best_config.get("train_csv") and best_config.get("val_csv"):
+        cmd.extend(
+            [
+                "--train-csv",
+                str(best_config["train_csv"]),
+                "--val-csv",
+                str(best_config["val_csv"]),
+            ]
+        )
+        if best_config.get("test_csv"):
+            cmd.extend(["--test-csv", str(best_config["test_csv"])])
+    else:
+        if args.train_val_csv is not None:
+            cmd.extend(["--train-val-csv", args.train_val_csv])
+        elif best_config.get("train_val_csv"):
+            cmd.extend(["--train-val-csv", str(best_config["train_val_csv"])])
+        if args.test_csv is not None:
+            cmd.extend(["--test-csv", args.test_csv])
+        elif best_config.get("test_csv"):
+            cmd.extend(["--test-csv", str(best_config["test_csv"])])
     if supports_loss_weights:
         loss_lap = best_config.get("loss_laplacian_weight", args.loss_laplacian_weight)
-        pred_smooth = best_config.get("pred_smoothing_window", args.pred_smoothing_window)
+        pred_smooth = args.pred_smoothing_window
         cmd.extend(
             [
                 "--loss-point-weight",

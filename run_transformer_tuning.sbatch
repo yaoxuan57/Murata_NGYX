@@ -15,7 +15,8 @@ set -euo pipefail
 
 mkdir -p ~/logs
 
-COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288"
+# No post-smoothing on forecast horizons (--pred-smoothing-window 1).
+COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1"
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
 TARGET_COLUMN=${TARGET_COLUMN:-"Acceleration RMS"}
 ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
@@ -23,11 +24,31 @@ COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}
 
 TRAIN_VAL_CSV=${TRAIN_VAL_CSV:-data_train_val.csv}
 TEST_CSV=${TEST_CSV:-data_test_anomalous.csv}
-TRAIN_VAL_BASENAME="$(basename "${TRAIN_VAL_CSV}" .csv)"
-TEST_BASENAME="$(basename "${TEST_CSV}" .csv)"
-DATA_TAG="${TRAIN_VAL_BASENAME}_to_${TEST_BASENAME}"
-TRAIN_VAL_PARENT="$(dirname "${TRAIN_VAL_CSV}")"
-DATA_FOLDER_NAME="$(basename "${TRAIN_VAL_PARENT}")"
+TRAIN_CSV=${TRAIN_CSV:-}
+VAL_CSV=${VAL_CSV:-}
+SINGLE_CSV=${SINGLE_CSV:-}
+TRAIN_RATIO=${TRAIN_RATIO:-0.70}
+VAL_RATIO=${VAL_RATIO:-0.15}
+
+if [ -n "${SINGLE_CSV}" ]; then
+  DATA_FLAGS="--single-csv ${SINGLE_CSV} --train-ratio ${TRAIN_RATIO} --val-ratio ${VAL_RATIO}"
+  if [ -n "${TEST_RATIO:-}" ]; then
+    DATA_FLAGS="${DATA_FLAGS} --test-ratio ${TEST_RATIO}"
+  fi
+  DATA_TAG="$(basename "${SINGLE_CSV}" .csv)_single_r${TRAIN_RATIO}_v${VAL_RATIO}"
+  REF_PARENT="$(dirname "${SINGLE_CSV}")"
+elif [ -n "${TRAIN_CSV}" ] && [ -n "${VAL_CSV}" ]; then
+  DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
+  DATA_TAG="$(basename "${TRAIN_CSV}" .csv)__$(basename "${VAL_CSV}" .csv)__to__$(basename "${TEST_CSV}" .csv)"
+  REF_PARENT="$(dirname "${TRAIN_CSV}")"
+else
+  DATA_FLAGS="--train-val-csv ${TRAIN_VAL_CSV} --test-csv ${TEST_CSV}"
+  TRAIN_VAL_BASENAME="$(basename "${TRAIN_VAL_CSV}" .csv)"
+  TEST_BASENAME="$(basename "${TEST_CSV}" .csv)"
+  DATA_TAG="${TRAIN_VAL_BASENAME}_to_${TEST_BASENAME}"
+  REF_PARENT="$(dirname "${TRAIN_VAL_CSV}")"
+fi
+DATA_FOLDER_NAME="$(basename "${REF_PARENT}")"
 if [ "${DATA_FOLDER_NAME}" = "." ]; then
   DATA_FOLDER_SUFFIX=""
 else
@@ -36,7 +57,6 @@ fi
 
 MODEL_SLUG="transformer"
 TRAIN_SCRIPT="train_transformer_sweep.py"
-DATA_FLAGS="--train-val-csv ${TRAIN_VAL_CSV} --test-csv ${TEST_CSV}"
 
 ROOT="outputs_${MODEL_SLUG}_tuning${DATA_FOLDER_SUFFIX}_${DATA_TAG}"
 RUNS="${ROOT}/runs"
@@ -51,12 +71,21 @@ python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGE
 
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
 
+if [ -n "${SINGLE_CSV}" ]; then
+  RERUN_DATA=(--single-csv "${SINGLE_CSV}" --train-ratio "${TRAIN_RATIO}" --val-ratio "${VAL_RATIO}")
+  if [ -n "${TEST_RATIO:-}" ]; then
+    RERUN_DATA+=(--test-ratio "${TEST_RATIO}")
+  fi
+elif [ -n "${TRAIN_CSV}" ] && [ -n "${VAL_CSV}" ]; then
+  RERUN_DATA=(--train-csv "${TRAIN_CSV}" --val-csv "${VAL_CSV}" --test-csv "${TEST_CSV}")
+else
+  RERUN_DATA=(--train-val-csv "${TRAIN_VAL_CSV}" --test-csv "${TEST_CSV}")
+fi
 python -u rerun_best_sweep_with_plots.py \
   --selection-json "${RUNS}/best_run_selection.json" \
   --train-script "${TRAIN_SCRIPT}" \
   --output-root "${BEST}" \
-  --train-val-csv "${TRAIN_VAL_CSV}" \
-  --test-csv "${TEST_CSV}" \
+  "${RERUN_DATA[@]}" \
   --value-column "${TARGET_COLUMN}" \
   --use-all-numeric-features \
   ${COMMON_ROLLING} \

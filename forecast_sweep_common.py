@@ -15,8 +15,51 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 
 def add_common_args(parser, default_output_dir: str, default_checkpoint_name: str):
+    parser.add_argument(
+        "--train-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="If set together with --val-csv, load three disjoint CSVs (train / val / test). "
+        "Normalization uses train only. Prefer files cut at timestamp gaps so each file is one contiguous run.",
+    )
+    parser.add_argument(
+        "--val-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Companion to --train-csv for an explicit validation set (disables row-based val split).",
+    )
     parser.add_argument("--train-val-csv", type=str, default="data_train_val.csv")
     parser.add_argument("--test-csv", type=str, default="data_test_anomalous.csv")
+    parser.add_argument(
+        "--single-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load one chronological CSV and split train/val/test by window counts (see --train-ratio, --val-ratio, --test-ratio). "
+        "Each window still requires uniform TIMESTAMP steps (--require-uniform-timestep). "
+        "Cannot be combined with --train-csv/--val-csv or the two-file train_val+test setup.",
+    )
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.70,
+        help="With --single-csv: target fraction of valid windows for training (chronological). Ignored otherwise.",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=None,
+        help="With --single-csv: test window fraction; default 1 - train_ratio - val_ratio.",
+    )
+    parser.add_argument(
+        "--min-windows-per-split",
+        type=int,
+        default=1,
+        metavar="N",
+        help="With --single-csv: minimum windows in each split after ratio allocation (raised if impossible).",
+    )
     parser.add_argument(
         "--value-column",
         type=str,
@@ -58,7 +101,14 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument("--input-lens", type=int, nargs="+", default=[432,576,864])
     parser.add_argument("--pred-lens", type=int, nargs="+", default=[288])
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--val-ratio", type=float, default=0.15)
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.15,
+        help="1) Legacy: holdout fraction of windows from --train-val-csv. "
+        "2) With --single-csv: val window fraction (with --train-ratio, --test-ratio). "
+        "Ignored when --train-csv and --val-csv are set.",
+    )
     parser.add_argument("--early-stopping-patience", type=int, default=20)
     parser.add_argument("--scheduler-patience", type=int, default=3)
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
@@ -95,6 +145,31 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         metavar="N",
         help="If set, write at most N per-window CSV and PNG files under rolling_window_forecasts/, "
         "evenly spaced from the first to last window. All windows remain in all_windows_forecasts.csv.",
+    )
+    parser.add_argument(
+        "--require-uniform-timestep",
+        dest="require_uniform_timestep",
+        action="store_true",
+        help="Only build windows whose TIMESTAMP steps are uniformly spaced (see --uniform-step-seconds). "
+        "Skips spanning gaps where the machine was off/rested. Rows must be chronological.",
+    )
+    parser.add_argument(
+        "--no-require-uniform-timestep",
+        dest="require_uniform_timestep",
+        action="store_false",
+    )
+    parser.set_defaults(require_uniform_timestep=True)
+    parser.add_argument(
+        "--uniform-step-seconds",
+        type=float,
+        default=5.0,
+        help="Nominal interval between consecutive rows when uniform timestep filtering is enabled.",
+    )
+    parser.add_argument(
+        "--uniform-step-tolerance-seconds",
+        type=float,
+        default=1.01,
+        help="Half-width tolerance on each step vs nominal (seconds). Rows outside nominal±tol break a contiguous run.",
     )
     return parser
 
@@ -210,8 +285,93 @@ def parse_timestamp_series(series: pd.Series, name: str) -> pd.Series:
     return parsed
 
 
+def compute_uniform_timestep_start_indices(
+    timestamps: pd.Series,
+    span_len: int,
+    nominal_seconds: float = 5.0,
+    tolerance_seconds: float = 1.01,
+) -> np.ndarray:
+    """
+    Indices i such that timestamps.iloc[i : i + span_len] advances by nominal_seconds (+/- tol)
+    at every consecutive pair. Gaps or irregular steps break contiguous runs — windows never
+    glue two runs together.
+    """
+    ts = pd.Series(timestamps).reset_index(drop=True)
+    if span_len <= 0:
+        raise ValueError("span_len must be positive.")
+    if len(ts) < span_len:
+        return np.array([], dtype=np.int64)
+    values = ts.to_numpy(dtype="datetime64[ns]")
+    if span_len == 1:
+        return np.arange(len(ts), dtype=np.int64)
+
+    diffs_ns = np.diff(values.astype("int64"))
+    nominal_ns = int(round(float(nominal_seconds) * 1e9))
+    tol_ns = int(round(float(tolerance_seconds) * 1e9))
+    step_ok = np.abs(diffs_ns - nominal_ns) <= tol_ns
+    m = span_len - 1
+    if step_ok.size < m:
+        return np.array([], dtype=np.int64)
+    conv = np.convolve(step_ok.astype(np.int32), np.ones(m, dtype=np.int32), mode="valid")
+    return np.where(conv == m)[0].astype(np.int64)
+
+
+def row_indices_covered_by_windows(starts: np.ndarray, span: int, n_rows: int) -> np.ndarray:
+    """Sorted unique row indices touched by any window [s, s + span) for s in starts."""
+    starts = np.asarray(starts, dtype=np.int64)
+    if starts.size == 0:
+        return np.zeros(0, dtype=np.int64)
+    if starts.size >= 2 and np.all(np.diff(starts) == 1):
+        lo = int(starts[0])
+        hi = int(starts[-1]) + int(span)
+        return np.arange(lo, min(hi, n_rows), dtype=np.int64)
+    m = np.zeros(int(n_rows), dtype=bool)
+    for s in starts:
+        ss = int(s)
+        if ss < 0:
+            continue
+        m[ss : min(ss + int(span), n_rows)] = True
+    return np.flatnonzero(m)
+
+
+def split_window_counts(
+    total: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    min_each: int = 1,
+) -> Tuple[int, int, int]:
+    """
+    Integer train/val/test window counts approximating the given ratios, summing to ``total``.
+    Each split receives at least ``min_each`` windows; remaining windows split by ratio.
+    """
+    if total < 3 * min_each:
+        raise ValueError(
+            f"Need at least {3 * min_each} valid windows for train/val/test (got {total})."
+        )
+    w = np.asarray([train_ratio, val_ratio, test_ratio], dtype=np.float64)
+    if np.any(w < 0):
+        raise ValueError("train/val/test ratios must be non-negative.")
+    ssum = float(w.sum())
+    if ssum <= 0:
+        raise ValueError("train/val/test ratios must sum to a positive value.")
+    w /= ssum
+    left = total - 3 * min_each
+    raw = left * w
+    extra = np.floor(raw).astype(int)
+    rem = left - int(extra.sum())
+    frac_order = np.argsort(-(raw - extra))
+    for k in range(rem):
+        extra[int(frac_order[k % 3])] += 1
+    parts = min_each + extra
+    sp = int(parts.sum())
+    if sp != total:
+        raise RuntimeError(f"split_window_counts internal error: sums to {sp} != {total}.")
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
 class MultiStepDeltaDataset(Dataset):
-    def __init__(self, features_norm, target_norm, input_len, pred_len):
+    def __init__(self, features_norm, target_norm, input_len, pred_len, sample_starts=None):
         features_norm = np.asarray(features_norm, dtype=np.float32)
         target_norm = np.asarray(target_norm, dtype=np.float32)
         if features_norm.ndim != 2:
@@ -222,20 +382,35 @@ class MultiStepDeltaDataset(Dataset):
             raise ValueError("features_norm and target_norm must have identical time length.")
         self.input_len = input_len
         self.pred_len = pred_len
-        self.n_samples = len(target_norm) - input_len - pred_len + 1
+        tlen = len(target_norm)
+        span = input_len + pred_len
 
-        if self.n_samples <= 0:
-            raise ValueError("Series too short for given input_len and pred_len.")
+        if sample_starts is None:
+            n_sliding = tlen - span + 1
+            if n_sliding <= 0:
+                raise ValueError("Series too short for given input_len and pred_len.")
+            self.sample_starts = np.arange(n_sliding, dtype=np.int64)
+        else:
+            self.sample_starts = np.asarray(sample_starts, dtype=np.int64)
+            if self.sample_starts.ndim != 1:
+                raise ValueError("sample_starts must be a 1D array of row indices.")
+            if self.sample_starts.size == 0:
+                raise ValueError("No valid training windows (uniform timestep or length).")
+            if (self.sample_starts < 0).any() or ((self.sample_starts + span) > tlen).any():
+                raise ValueError(
+                    "sample_starts entries must satisfy 0 <= i and i + input_len + pred_len <= len(series)."
+                )
 
-        x = np.array([features_norm[i:i + input_len, :] for i in range(self.n_samples)], dtype=np.float32)
+        idx = self.sample_starts
+        x = np.stack([features_norm[i : i + input_len, :] for i in idx], axis=0).astype(np.float32)
         x = np.transpose(x, (0, 2, 1))
 
-        future = np.array(
-            [target_norm[i + input_len:i + input_len + pred_len] for i in range(self.n_samples)],
-            dtype=np.float32,
-        )
+        future = np.stack(
+            [target_norm[i + input_len : i + input_len + pred_len] for i in idx],
+            axis=0,
+        ).astype(np.float32)
 
-        last_val = np.array([target_norm[i + input_len - 1] for i in range(self.n_samples)], dtype=np.float32)[:, None]
+        last_val = target_norm[idx + input_len - 1].astype(np.float32)[:, None]
         y_delta = future - last_val
 
         self.x = torch.tensor(x, dtype=torch.float32)
@@ -424,6 +599,12 @@ def build_horizon_forecast_dataframe(timestamps, actual, predicted, horizon):
     )
 
 
+def _forecast_smoothing_caption(pred_smoothing_window: int) -> str:
+    if pred_smoothing_window <= 1:
+        return "No post-smoothing (pred-smoothing-window = 1)"
+    return f"Post-smoothing applied (pred-smoothing-window = {pred_smoothing_window})"
+
+
 def evenly_spaced_window_indices(n_windows: int, k: int) -> Set[int]:
     """Up to k indices in [0, n_windows-1], equally spaced (endpoints included when k >= 2)."""
     if n_windows <= 0 or k <= 0:
@@ -440,17 +621,19 @@ def _plot_rolling_window_png(
     window_idx: int,
     input_len: int,
     pred_len: int,
-    input_feature_series_raw: Optional[np.ndarray],
-    input_feature_names: Optional[list],
     history_series_raw: np.ndarray,
     targets_row: np.ndarray,
     preds_row: np.ndarray,
     y_axis_label: str,
     path: str,
     dpi: int = 140,
+    input_row_start: Optional[int] = None,
+    input_context_label: str = "Acceleration RMS",
+    pred_smoothing_window: int = 1,
 ):
-    """Single-panel plot: left input-feature context, right target forecast actual vs predicted."""
-    hist = np.asarray(history_series_raw[window_idx : window_idx + input_len], dtype=np.float64)
+    """Left: single input series (z-scored), e.g. raw Acceleration RMS; right: forecast horizon."""
+    row0 = window_idx if input_row_start is None else int(input_row_start)
+    hist = np.asarray(history_series_raw[row0 : row0 + input_len], dtype=np.float64)
     x_hist = np.arange(0, input_len, dtype=np.float64)
     x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
     w_in = max(10.0, min(22.0, 6.0 + 0.004 * float(input_len + pred_len)))
@@ -458,25 +641,26 @@ def _plot_rolling_window_png(
     ax_right = ax_left.twinx()
 
     ax_left.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
-    if input_feature_series_raw is not None and input_feature_names is not None and len(input_feature_names) > 0:
-        feature_ctx = np.asarray(input_feature_series_raw[window_idx : window_idx + input_len, :], dtype=np.float64)
-        n_feat = feature_ctx.shape[1]
-        for j in range(n_feat):
-            vec = feature_ctx[:, j]
-            vstd = vec.std()
-            norm = (vec - vec.mean()) / (vstd + 1e-8)
-            label = input_feature_names[j] if j < len(input_feature_names) else f"feature_{j}"
-            ax_left.plot(x_hist, norm, linewidth=0.8, alpha=0.6, label=f"Input: {label}", zorder=2)
-    else:
-        vec = hist
-        vstd = vec.std()
-        norm = (vec - vec.mean()) / (vstd + 1e-8)
-        ax_left.plot(x_hist, norm, linewidth=0.9, alpha=0.7, label="Input context (normalized)", zorder=2)
+    vstd = hist.std()
+    norm = (hist - hist.mean()) / (vstd + 1e-8)
+    ax_left.plot(
+        x_hist,
+        norm,
+        linewidth=0.95,
+        alpha=0.85,
+        color="0.35",
+        label=f"{input_context_label} — input (z-scored)",
+        zorder=2,
+    )
 
     ax_right.plot(x_fore, targets_row, color="C0", linewidth=1.3, label="Actual target", zorder=4)
     ax_right.plot(x_fore, preds_row, color="C1", linewidth=1.1, label="Predicted target", zorder=4)
-    ax_left.set_title(f"Window {window_idx} — input context + target forecast ({pred_len}-step)")
-    ax_left.set_ylabel("Input features (per-feature z-score)")
+    ax_left.set_title(
+        f"Window {window_idx} — {input_context_label} input + forecast ({pred_len}-step)\n"
+        f"{_forecast_smoothing_caption(pred_smoothing_window)}",
+        fontsize=10,
+    )
+    ax_left.set_ylabel(f"{input_context_label} (z-scored)")
     ax_right.set_ylabel(y_axis_label)
     ax_left.set_xlabel(
         f"Step index (0-{input_len - 1}: input context | {input_len}-{input_len + pred_len - 1}: horizon)"
@@ -502,8 +686,9 @@ def save_rolling_window_forecasts(
     max_per_window_artifacts: Optional[int] = None,
     y_axis_label: str = "Value",
     history_series_raw: Optional[np.ndarray] = None,
-    input_feature_series_raw: Optional[np.ndarray] = None,
-    input_feature_names: Optional[list] = None,
+    window_input_row_starts: Optional[np.ndarray] = None,
+    input_context_label: str = "Acceleration RMS",
+    pred_smoothing_window: int = 1,
 ):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
@@ -513,6 +698,14 @@ def save_rolling_window_forecasts(
 
     all_rows = []
     n_windows = preds_raw.shape[0]
+    if window_input_row_starts is None:
+        input_starts = np.arange(n_windows, dtype=np.int64)
+    else:
+        input_starts = np.asarray(window_input_row_starts, dtype=np.int64).reshape(-1)
+        if input_starts.shape[0] != n_windows:
+            raise ValueError(
+                f"window_input_row_starts length {input_starts.shape[0]} != n_windows {n_windows}"
+            )
 
     if max_per_window_artifacts is None or max_per_window_artifacts <= 0:
         save_indices = set(range(n_windows))
@@ -530,7 +723,8 @@ def save_rolling_window_forecasts(
         )
 
     for window_idx in range(n_windows):
-        start_idx = input_len + window_idx
+        row0 = int(input_starts[window_idx])
+        start_idx = row0 + input_len
         ts_window = timestamps.iloc[start_idx : start_idx + pred_len]
 
         window_df = pd.DataFrame(
@@ -552,29 +746,37 @@ def save_rolling_window_forecasts(
         if save_plots and window_idx in save_indices:
             window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
             if history_series_raw is not None:
-                exp_len = preds_raw.shape[0] + input_len + pred_len - 1
-                if len(history_series_raw) < exp_len:
+                need_len = (
+                    preds_raw.shape[0] + input_len + pred_len - 1
+                    if window_input_row_starts is None
+                    else int(np.max(input_starts)) + input_len + pred_len
+                )
+                if len(history_series_raw) < need_len:
                     raise ValueError(
-                        f"history_series_raw length {len(history_series_raw)} < required {exp_len} "
+                        f"history_series_raw length {len(history_series_raw)} < required {need_len} "
                         f"for rolling plots (windows={preds_raw.shape[0]}, input_len={input_len}, pred_len={pred_len})."
                     )
                 _plot_rolling_window_png(
                     window_idx=window_idx,
                     input_len=input_len,
                     pred_len=pred_len,
-                    input_feature_series_raw=input_feature_series_raw,
-                    input_feature_names=input_feature_names,
                     history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
                     targets_row=np.asarray(window_df["actual"], dtype=np.float32),
                     preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
                     y_axis_label=y_axis_label,
                     path=window_plot_path,
+                    input_row_start=row0,
+                    input_context_label=input_context_label,
+                    pred_smoothing_window=pred_smoothing_window,
                 )
             else:
                 plt.figure(figsize=(8, 3))
                 plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
                 plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
-                plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
+                plt.title(
+                    f"Window {window_idx} Forecast ({pred_len}-step)\n"
+                    f"{_forecast_smoothing_caption(pred_smoothing_window)}"
+                )
                 plt.xlabel("Step Ahead")
                 plt.ylabel(y_axis_label)
                 plt.legend()
@@ -606,23 +808,29 @@ def save_rolling_window_forecasts(
                     continue
 
                 if history_series_raw is not None:
+                    wix = int(window_df["window_index"].iloc[0])
+                    rs = int(input_starts[wix])
                     _plot_rolling_window_png(
-                        window_idx=int(window_df["window_index"].iloc[0]),
+                        window_idx=wix,
                         input_len=input_len,
                         pred_len=pred_len,
-                        input_feature_series_raw=input_feature_series_raw,
-                        input_feature_names=input_feature_names,
                         history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
                         targets_row=np.asarray(window_df["actual"], dtype=np.float32),
                         preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
                         y_axis_label=y_axis_label,
                         path=window_plot_path,
+                        input_row_start=rs,
+                        input_context_label=input_context_label,
+                        pred_smoothing_window=pred_smoothing_window,
                     )
                 else:
                     plt.figure(figsize=(8, 3))
                     plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
                     plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
-                    plt.title(f"Window {window_idx} Forecast ({pred_len}-step)")
+                    plt.title(
+                        f"Window {window_idx} Forecast ({pred_len}-step)\n"
+                        f"{_forecast_smoothing_caption(pred_smoothing_window)}"
+                    )
                     plt.xlabel("Step Ahead")
                     plt.ylabel(y_axis_label)
                     plt.legend()
@@ -650,81 +858,371 @@ def run_sweep(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    df_train_val = pd.read_csv(args.train_val_csv)
-    df_test = pd.read_csv(args.test_csv)
+    tr_path = args.train_csv
+    va_path = args.val_csv
+    if (tr_path is None) ^ (va_path is None):
+        raise ValueError("Set both --train-csv and --val-csv, or neither (use --train-val-csv for train+val).")
+    explicit_tv = tr_path is not None and va_path is not None
+    single_file_mode = args.single_csv is not None
 
-    df_train_val["TIMESTAMP"] = parse_timestamp_series(df_train_val["TIMESTAMP"], args.train_val_csv)
-    df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+    if single_file_mode and explicit_tv:
+        raise ValueError("Use either --single-csv or (--train-csv and --val-csv), not both.")
+    if single_file_mode:
+        df_all = pd.read_csv(args.single_csv)
+        df_all["TIMESTAMP"] = parse_timestamp_series(df_all["TIMESTAMP"], args.single_csv)
+        df_all = df_all.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_test = df_all
+        df_train_val = None
+        df_train = None
+        df_val = None
+        rte_resolve = (
+            args.test_ratio if args.test_ratio is not None else (1.0 - args.train_ratio - args.val_ratio)
+        )
+        ssum = float(args.train_ratio + args.val_ratio + rte_resolve)
+        if abs(ssum - 1.0) > 2e-3:
+            raise ValueError(
+                f"--train-ratio, --val-ratio, and --test-ratio (or implied test) must sum to 1; got {ssum:.6f}."
+            )
+        setattr(args, "test_ratio_resolved", float(rte_resolve))
+        print(
+            f"Single-CSV split (window counts): train={args.train_ratio:.4f}, val={args.val_ratio:.4f}, "
+            f"test={rte_resolve:.4f}"
+        )
+    elif explicit_tv:
+        df_test = pd.read_csv(args.test_csv)
+        df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+        df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_train = pd.read_csv(tr_path)
+        df_val = pd.read_csv(va_path)
+        df_train["TIMESTAMP"] = parse_timestamp_series(df_train["TIMESTAMP"], tr_path)
+        df_val["TIMESTAMP"] = parse_timestamp_series(df_val["TIMESTAMP"], va_path)
+        df_train = df_train.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_val = df_val.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_train_val = None
+        df_all = None
+    else:
+        df_all = None
+        df_train = df_val = None
+        df_test = pd.read_csv(args.test_csv)
+        df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+        df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_train_val = pd.read_csv(args.train_val_csv)
+        df_train_val["TIMESTAMP"] = parse_timestamp_series(df_train_val["TIMESTAMP"], args.train_val_csv)
+        df_train_val = df_train_val.sort_values("TIMESTAMP").reset_index(drop=True)
 
     vc = args.value_column
-    for label, frame, csv_path in (
-        ("train_val", df_train_val, args.train_val_csv),
-        ("test", df_test, args.test_csv),
-    ):
+
+    def _frames_iter():
+        if single_file_mode:
+            yield ("data", df_all, args.single_csv)
+        elif explicit_tv:
+            yield ("train", df_train, tr_path)
+            yield ("val", df_val, va_path)
+            yield ("test", df_test, args.test_csv)
+        else:
+            yield ("train_val", df_train_val, args.train_val_csv)
+            yield ("test", df_test, args.test_csv)
+
+    for label, frame, csv_path in _frames_iter():
         if vc not in frame.columns:
             raise ValueError(
                 f"Value column {vc!r} not found in {label} CSV {csv_path!r}. "
                 f"Columns: {list(frame.columns)}. Pass --value-column with an existing column name."
             )
 
+    if single_file_mode:
+        ref_frame = df_all
+    elif explicit_tv:
+        ref_frame = df_train
+    else:
+        ref_frame = df_train_val
     if args.use_all_numeric_features:
         ignore_cols = {"TIMESTAMP", "Acceleration RMS (smoothed)"}
-        feature_cols = [c for c in df_train_val.columns if c not in ignore_cols and pd.api.types.is_numeric_dtype(df_train_val[c])]
+        feature_cols = [
+            c
+            for c in ref_frame.columns
+            if c not in ignore_cols and pd.api.types.is_numeric_dtype(ref_frame[c])
+        ]
     elif args.feature_columns:
         feature_cols = list(args.feature_columns)
     else:
         feature_cols = [vc]
-    for label, frame, csv_path in (
-        ("train_val", df_train_val, args.train_val_csv),
-        ("test", df_test, args.test_csv),
-    ):
+
+    for label, frame, csv_path in _frames_iter():
         missing = [c for c in feature_cols if c not in frame.columns]
         if missing:
             raise ValueError(
                 f"Feature columns missing in {label} CSV {csv_path!r}: {missing}. "
                 f"Available columns: {list(frame.columns)}"
             )
-    tv_series = df_train_val[vc].to_numpy(dtype=np.float32)
+
     test_series = df_test[vc].to_numpy(dtype=np.float32)
-    tv_features = df_train_val[feature_cols].to_numpy(dtype=np.float32)
     test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
-    n_features = int(tv_features.shape[1])
+
+    if explicit_tv:
+        train_series = df_train[vc].to_numpy(dtype=np.float32)
+        val_series = df_val[vc].to_numpy(dtype=np.float32)
+        train_features = df_train[feature_cols].to_numpy(dtype=np.float32)
+        val_features = df_val[feature_cols].to_numpy(dtype=np.float32)
+        tv_series = tv_features = tv_feat_norm = tv_target_norm = None
+        train_end_idx = None
+        full_series = full_features = None
+    elif single_file_mode:
+        full_series = df_all[vc].to_numpy(dtype=np.float32)
+        full_features = df_all[feature_cols].to_numpy(dtype=np.float32)
+        train_series = val_series = train_features = val_features = None
+        tv_series = tv_features = tv_feat_norm = tv_target_norm = None
+        train_end_idx = None
+    else:
+        full_series = full_features = None
+        train_series = val_series = train_features = val_features = None
+        tv_series = df_train_val[vc].to_numpy(dtype=np.float32)
+        tv_features = df_train_val[feature_cols].to_numpy(dtype=np.float32)
+
+    n_features = int(len(feature_cols))
     setattr(args, "input_dim", n_features)
     setattr(args, "feature_columns_resolved", feature_cols)
+    setattr(args, "data_split_explicit_tv", explicit_tv)
+    setattr(args, "data_split_single_csv", single_file_mode)
     print(f"Target column: {vc}")
     print(f"Input feature columns ({n_features}): {feature_cols}")
+    if single_file_mode:
+        print(f"Data split: single CSV ({args.single_csv}), chronological window ratios")
+        print(f"Rows in file: {len(full_series)}")
+    elif explicit_tv:
+        print("Data split: explicit train / val / test CSVs")
+        print("(Val holdout fraction --val-ratio is ignored when --train-csv and --val-csv are set.)")
+        print(f"Train rows   : {len(train_series)}  ({tr_path})")
+        print(f"Val rows     : {len(val_series)}  ({va_path})")
+        print(f"Test rows    : {len(test_series)}  ({args.test_csv})")
+    else:
+        print("Data split: train_val CSV + test CSV; val = tail fraction of train_val windows")
+        print(f"Train+Val series length : {len(tv_series)}")
+        print(f"Test series length      : {len(test_series)}")
+    if args.require_uniform_timestep:
+        print(
+            f"Uniform timestep windows: nominal step {args.uniform_step_seconds}s "
+            f"(±{args.uniform_step_tolerance_seconds}s per adjacent pair)."
+        )
 
-    print(f"Train+Val series length : {len(tv_series)}")
-    print(f"Test series length      : {len(test_series)}")
-
-    train_end_idx = int(len(tv_series) * (1 - args.val_ratio))
-    train_mean = tv_series[:train_end_idx].mean()
-    train_std = tv_series[:train_end_idx].std() + 1e-8
-
-    feat_train = tv_features[:train_end_idx]
-    feat_mean = feat_train.mean(axis=0)
-    feat_std = feat_train.std(axis=0) + 1e-8
-    tv_feat_norm = (tv_features - feat_mean) / feat_std
-    test_feat_norm = (test_features - feat_mean) / feat_std
-    tv_target_norm = (tv_series - train_mean) / train_std
-    test_target_norm = (test_series - train_mean) / train_std
-
-    print(f"train_mean: {train_mean:.6f}")
-    print(f"train_std : {train_std:.6f}")
+    if single_file_mode:
+        train_mean = float("nan")
+        train_std = float("nan")
+    elif explicit_tv:
+        train_mean = train_series.mean()
+        train_std = train_series.std() + 1e-8
+        feat_mean = train_features.mean(axis=0)
+        feat_std = train_features.std(axis=0) + 1e-8
+        train_feat_norm = (train_features - feat_mean) / feat_std
+        val_feat_norm = (val_features - feat_mean) / feat_std
+        test_feat_norm = (test_features - feat_mean) / feat_std
+        train_target_norm = (train_series - train_mean) / train_std
+        val_target_norm = (val_series - train_mean) / train_std
+        test_target_norm = (test_series - train_mean) / train_std
+        print(f"train_mean: {train_mean:.6f}")
+        print(f"train_std : {train_std:.6f}")
+    else:
+        train_end_idx = int(len(tv_series) * (1 - args.val_ratio))
+        train_mean = tv_series[:train_end_idx].mean()
+        train_std = tv_series[:train_end_idx].std() + 1e-8
+        feat_train = tv_features[:train_end_idx]
+        feat_mean = feat_train.mean(axis=0)
+        feat_std = feat_train.std(axis=0) + 1e-8
+        tv_feat_norm = (tv_features - feat_mean) / feat_std
+        test_feat_norm = (test_features - feat_mean) / feat_std
+        tv_target_norm = (tv_series - train_mean) / train_std
+        test_target_norm = (test_series - train_mean) / train_std
+        train_feat_norm = val_feat_norm = train_target_norm = val_target_norm = None
+        print(f"train_mean: {train_mean:.6f}")
+        print(f"train_std : {train_std:.6f}")
 
     experiment_results = []
 
     for input_len in args.input_lens:
         for pred_len in args.pred_lens:
             try:
-                tv_dataset = MultiStepDeltaDataset(tv_feat_norm, tv_target_norm, input_len=input_len, pred_len=pred_len)
-                test_dataset = MultiStepDeltaDataset(test_feat_norm, test_target_norm, input_len=input_len, pred_len=pred_len)
+                span = input_len + pred_len
+                uniform_kw = dict(
+                    span_len=span,
+                    nominal_seconds=args.uniform_step_seconds,
+                    tolerance_seconds=args.uniform_step_tolerance_seconds,
+                )
+                if single_file_mode:
+                    T = int(len(full_series))
+                    if args.require_uniform_timestep:
+                        all_valid = compute_uniform_timestep_start_indices(df_all["TIMESTAMP"], **uniform_kw)
+                        n_slide = max(0, T - span + 1)
+                        print(
+                            f"  Single CSV uniform windows: {len(all_valid)}/{n_slide} valid starts "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
+                    else:
+                        n_slide = max(0, T - span + 1)
+                        all_valid = np.arange(n_slide, dtype=np.int64) if n_slide > 0 else np.zeros(0, dtype=np.int64)
+                        print(
+                            f"  Single CSV dense sliding: {len(all_valid)} starts "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
+                    M = int(all_valid.shape[0])
+                    rte_loop = (
+                        args.test_ratio
+                        if args.test_ratio is not None
+                        else (1.0 - args.train_ratio - args.val_ratio)
+                    )
+                    n_tr_w, n_va_w, n_te_w = split_window_counts(
+                        M,
+                        args.train_ratio,
+                        args.val_ratio,
+                        rte_loop,
+                        min_each=int(args.min_windows_per_split),
+                    )
+                    train_starts_arr = all_valid[:n_tr_w]
+                    val_starts_arr = all_valid[n_tr_w : n_tr_w + n_va_w]
+                    test_starts_arr = all_valid[n_tr_w + n_va_w :]
+                    print(
+                        f"    Window splits: train={n_tr_w} ({n_tr_w / max(M, 1):.4f}), "
+                        f"val={n_va_w}, test={n_te_w} (target ratios "
+                        f"{args.train_ratio:.4f}/{args.val_ratio:.4f}/{rte_loop:.4f})"
+                    )
+                    row_tr = row_indices_covered_by_windows(train_starts_arr, span, T)
+                    train_mean = float(np.mean(full_series[row_tr]))
+                    train_std = float(np.std(full_series[row_tr])) + 1e-8
+                    feat_mean = np.mean(full_features[row_tr], axis=0)
+                    feat_std = np.std(full_features[row_tr], axis=0) + 1e-8
+                    feat_norm_all = (full_features - feat_mean) / feat_std
+                    target_norm_all = (full_series - train_mean) / train_std
+                    train_dataset = MultiStepDeltaDataset(
+                        feat_norm_all,
+                        target_norm_all,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=train_starts_arr,
+                    )
+                    val_dataset = MultiStepDeltaDataset(
+                        feat_norm_all,
+                        target_norm_all,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=val_starts_arr,
+                    )
+                    test_dataset = MultiStepDeltaDataset(
+                        feat_norm_all,
+                        target_norm_all,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=test_starts_arr,
+                    )
+                    tv_starts = None
+                elif args.require_uniform_timestep:
+                    if explicit_tv:
+                        train_starts = compute_uniform_timestep_start_indices(df_train["TIMESTAMP"], **uniform_kw)
+                        val_starts = compute_uniform_timestep_start_indices(df_val["TIMESTAMP"], **uniform_kw)
+                        test_starts = compute_uniform_timestep_start_indices(df_test["TIMESTAMP"], **uniform_kw)
+                        n_tr_s = max(0, len(train_target_norm) - span + 1)
+                        n_va_s = max(0, len(val_target_norm) - span + 1)
+                        n_te_s = max(0, len(test_target_norm) - span + 1)
+                        print(
+                            f"  Uniform windows: train {len(train_starts)}/{n_tr_s} | "
+                            f"val {len(val_starts)}/{n_va_s} | "
+                            f"test {len(test_starts)}/{n_te_s} "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
+                    else:
+                        tv_starts = compute_uniform_timestep_start_indices(df_train_val["TIMESTAMP"], **uniform_kw)
+                        test_starts = compute_uniform_timestep_start_indices(df_test["TIMESTAMP"], **uniform_kw)
+                        train_starts = val_starts = None
+                        n_tv_sliding = max(0, len(tv_target_norm) - span + 1)
+                        n_test_sliding = max(0, len(test_target_norm) - span + 1)
+                        print(
+                            f"  Uniform windows kept: train_val {len(tv_starts)}/{n_tv_sliding} | "
+                            f"test {len(test_starts)}/{n_test_sliding} "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
 
-                n_tv = len(tv_dataset)
-                n_train = int(n_tv * (1 - args.val_ratio))
-
-                train_dataset = Subset(tv_dataset, range(0, n_train))
-                val_dataset = Subset(tv_dataset, range(n_train, n_tv))
+                    if explicit_tv:
+                        train_dataset = MultiStepDeltaDataset(
+                            train_feat_norm,
+                            train_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=train_starts,
+                        )
+                        val_dataset = MultiStepDeltaDataset(
+                            val_feat_norm,
+                            val_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=val_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                    else:
+                        tv_dataset = MultiStepDeltaDataset(
+                            tv_feat_norm,
+                            tv_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=tv_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                        n_tv = len(tv_dataset)
+                        n_train = int(n_tv * (1 - args.val_ratio))
+                        train_dataset = Subset(tv_dataset, range(0, n_train))
+                        val_dataset = Subset(tv_dataset, range(n_train, n_tv))
+                else:
+                    tv_starts = train_starts = val_starts = test_starts = None
+                    if explicit_tv:
+                        train_dataset = MultiStepDeltaDataset(
+                            train_feat_norm,
+                            train_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=train_starts,
+                        )
+                        val_dataset = MultiStepDeltaDataset(
+                            val_feat_norm,
+                            val_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=val_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                    else:
+                        tv_dataset = MultiStepDeltaDataset(
+                            tv_feat_norm,
+                            tv_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=tv_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                        n_tv = len(tv_dataset)
+                        n_train = int(n_tv * (1 - args.val_ratio))
+                        train_dataset = Subset(tv_dataset, range(0, n_train))
+                        val_dataset = Subset(tv_dataset, range(n_train, n_tv))
 
                 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
                 val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
@@ -823,8 +1321,8 @@ def run_sweep(
                 if args.pred_smoothing_window > 1:
                     pred_raw = smooth_forecast_vector(pred_raw, args.pred_smoothing_window)
 
-                ts_offset = input_len + sample_idx
-                pred_ts = df_test["TIMESTAMP"].iloc[ts_offset: ts_offset + pred_len]
+                ts_off = int(test_dataset.sample_starts[sample_idx])
+                pred_ts = df_test["TIMESTAMP"].iloc[ts_off + input_len : ts_off + input_len + pred_len]
 
                 experiment_results.append(
                     {
@@ -842,6 +1340,9 @@ def run_sweep(
                         "sample_pred_raw": pred_raw,
                         "sample_true_raw": true_raw,
                         "sample_timestamps": pred_ts,
+                        "test_sample_starts": np.asarray(test_dataset.sample_starts, dtype=np.int64).copy(),
+                        "train_mean": float(train_mean),
+                        "train_std": float(train_std),
                     }
                 )
             except ValueError as exc:
@@ -890,8 +1391,8 @@ def run_sweep(
         "model_state_dict": best_result["model_state_dict"],
         "best_val_loss": float(best_result["best_val_loss"]),
         "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
-        "train_mean": float(train_mean),
-        "train_std": float(train_std),
+        "train_mean": float(best_result["train_mean"]),
+        "train_std": float(best_result["train_std"]),
         "input_len": int(best_input_len),
         "pred_len": int(best_pred_len),
         "model_config": model_config_factory(args, best_input_len, best_pred_len),
@@ -911,14 +1412,30 @@ def run_sweep(
         "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
         "metrics": best_result["metrics"],
         "baseline_rmse": float(best_result["baseline_rmse"]),
+        "train_mean": float(best_result["train_mean"]),
+        "train_std": float(best_result["train_std"]),
     }
     with open(metrics_path, "w", encoding="utf-8") as fp:
         json.dump(metrics_payload, fp, indent=2)
 
     best_config_path = os.path.join(args.output_dir, "best_config.json")
     best_config_payload = {
-        "train_val_csv": args.train_val_csv,
-        "test_csv": args.test_csv,
+        "data_split_mode": (
+            "single_csv_window_ratios"
+            if single_file_mode
+            else ("explicit_train_val_test" if explicit_tv else "train_val_holdout")
+        ),
+        "single_csv": args.single_csv if single_file_mode else None,
+        "train_ratio_window": float(args.train_ratio) if single_file_mode else None,
+        "val_ratio_window": float(args.val_ratio) if single_file_mode else None,
+        "test_ratio_window": float(getattr(args, "test_ratio_resolved"))
+        if single_file_mode
+        else None,
+        "min_windows_per_split": int(args.min_windows_per_split) if single_file_mode else None,
+        "train_csv": tr_path if explicit_tv else None,
+        "val_csv": va_path if explicit_tv else None,
+        "train_val_csv": None if (explicit_tv or single_file_mode) else args.train_val_csv,
+        "test_csv": None if single_file_mode else args.test_csv,
         "value_column": args.value_column,
         "feature_columns": args.feature_columns_resolved,
         "use_all_numeric_features": bool(args.use_all_numeric_features),
@@ -928,7 +1445,11 @@ def run_sweep(
         "epochs": args.epochs,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
-        "val_ratio": args.val_ratio,
+        "val_ratio": (
+            None
+            if explicit_tv or single_file_mode
+            else float(args.val_ratio)
+        ),
         "early_stopping_patience": args.early_stopping_patience,
         "scheduler_patience": args.scheduler_patience,
         "scheduler_factor": args.scheduler_factor,
@@ -942,6 +1463,9 @@ def run_sweep(
         "pred_smoothing_window": args.pred_smoothing_window,
         "save_window_plots": args.save_window_plots,
         "rolling_window_artifact_limit": args.rolling_window_artifact_limit,
+        "require_uniform_timestep": bool(args.require_uniform_timestep),
+        "uniform_step_seconds": float(args.uniform_step_seconds),
+        "uniform_step_tolerance_seconds": float(args.uniform_step_tolerance_seconds),
         "best_input_len": int(best_input_len),
         "best_pred_len": int(best_pred_len),
         "model_config": model_config_factory(args, best_input_len, best_pred_len),
@@ -997,10 +1521,12 @@ def run_sweep(
         rotate_dates=True,
     )
 
+    starts = np.asarray(best_result["test_sample_starts"], dtype=np.int64)
     h = 0
     h_pred = best_result["all_preds_raw"][:, h]
     h_true = best_result["all_targets_raw"][:, h]
-    ts_h1 = df_test["TIMESTAMP"].iloc[best_input_len + h: best_input_len + h + len(h_pred)]
+    ts_rows = starts + best_input_len + h
+    ts_h1 = df_test["TIMESTAMP"].iloc[ts_rows.tolist()].reset_index(drop=True)
 
     horizon_1_path = os.path.join(args.output_dir, "best_horizon_1_forecast.csv")
     build_horizon_forecast_dataframe(
@@ -1026,7 +1552,8 @@ def run_sweep(
     h = min(11, best_pred_len - 1)
     h_pred = best_result["all_preds_raw"][:, h]
     h_true = best_result["all_targets_raw"][:, h]
-    ts_hn = df_test["TIMESTAMP"].iloc[best_input_len + h: best_input_len + h + len(h_pred)]
+    ts_rows_n = starts + best_input_len + h
+    ts_hn = df_test["TIMESTAMP"].iloc[ts_rows_n.tolist()].reset_index(drop=True)
 
     horizon_n_path = os.path.join(args.output_dir, f"best_horizon_{h + 1}_forecast.csv")
     build_horizon_forecast_dataframe(
@@ -1035,6 +1562,14 @@ def run_sweep(
         predicted=h_pred,
         horizon=h + 1,
     ).to_csv(horizon_n_path, index=False)
+
+    raw_col = args.raw_compare_column
+    if isinstance(raw_col, str) and raw_col in df_test.columns:
+        rolling_input_hist = df_test[raw_col].to_numpy(dtype=np.float32)
+        rolling_input_label = raw_col
+    else:
+        rolling_input_hist = test_series
+        rolling_input_label = str(args.value_column)
 
     rolling_windows_dir, rolling_combined_csv_path = save_rolling_window_forecasts(
         output_dir=args.output_dir,
@@ -1046,9 +1581,10 @@ def run_sweep(
         save_plots=args.save_window_plots,
         max_per_window_artifacts=args.rolling_window_artifact_limit,
         y_axis_label=args.value_column,
-        history_series_raw=test_series,
-        input_feature_series_raw=test_features,
-        input_feature_names=feature_cols,
+        history_series_raw=rolling_input_hist,
+        window_input_row_starts=starts,
+        input_context_label=rolling_input_label,
+        pred_smoothing_window=args.pred_smoothing_window,
     )
 
     save_plot(
