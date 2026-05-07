@@ -25,13 +25,32 @@ TARGET_COLUMN=${TARGET_COLUMN:-"Acceleration RMS"}
 ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
 COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}"
 
-TRAIN_VAL_CSV=${TRAIN_VAL_CSV:-data_train_val.csv}
-TEST_CSV=${TEST_CSV:-data_test_anomalous.csv}
+# Input feature selection. Two ways to override at submit time:
+#   1) INPUT_FEATURES — semicolon-separated column names (so column names with spaces work).
+#        sbatch --export=ALL,INPUT_FEATURES="Acceleration RMS;Kurtosis;Battery Voltage" run_transformer_tuning.sbatch
+#   2) USE_ALL_NUMERIC_FEATURES=1 (default) uses every numeric column except TIMESTAMP / smoothed target.
+#        Set USE_ALL_NUMERIC_FEATURES=0 (and leave INPUT_FEATURES empty) to fall back to TARGET_COLUMN only.
+INPUT_FEATURES=${INPUT_FEATURES:-}
+USE_ALL_NUMERIC_FEATURES=${USE_ALL_NUMERIC_FEATURES:-0}
+if [ -n "${INPUT_FEATURES}" ]; then
+  IFS=';' read -r -a INPUT_FEATURE_ARR <<< "${INPUT_FEATURES}"
+  FEATURE_FLAGS=(--feature-columns "${INPUT_FEATURE_ARR[@]}")
+  echo "Input features (explicit): ${INPUT_FEATURE_ARR[@]}"
+elif [ "${USE_ALL_NUMERIC_FEATURES}" = "1" ]; then
+  FEATURE_FLAGS=(--use-all-numeric-features)
+  echo "Input features: all numeric columns (default)."
+else
+  FEATURE_FLAGS=()
+  echo "Input features: target column only (${TARGET_COLUMN})."
+fi
+
+TRAIN_VAL_CSV=${TRAIN_VAL_CSV:-}
+TEST_CSV=${TEST_CSV:-}
 TRAIN_CSV=${TRAIN_CSV:-}
 VAL_CSV=${VAL_CSV:-}
-SINGLE_CSV=${SINGLE_CSV:-}
-TRAIN_RATIO=${TRAIN_RATIO:-0.70}
-VAL_RATIO=${VAL_RATIO:-0.15}
+SINGLE_CSV=${SINGLE_CSV:-data/AHU_2_9_Blower_DE_A.csv}
+TRAIN_RATIO=${TRAIN_RATIO:-0.80}
+VAL_RATIO=${VAL_RATIO:-0.10}
 
 if [ -n "${SINGLE_CSV}" ]; then
   DATA_FLAGS="--single-csv ${SINGLE_CSV} --train-ratio ${TRAIN_RATIO} --val-ratio ${VAL_RATIO}"
@@ -66,11 +85,11 @@ RUNS="${ROOT}/runs"
 BEST="${ROOT}/best_model"
 mkdir -p "${RUNS}" "${BEST}"
 
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" --use-all-numeric-features ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --d-model 128 --nhead 8 --num-layers 4 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_d128_h8_l4_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" --use-all-numeric-features ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --d-model 128 --nhead 8 --num-layers 5 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_d128_h8_l5_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" --use-all-numeric-features ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --d-model 160 --nhead 8 --num-layers 5 --dim-feedforward 320 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_d160_h8_l5_lr2e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" --use-all-numeric-features ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_d192_h8_l6_lr2e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" --use-all-numeric-features ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_d192_h8_l6_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --d-model 128 --nhead 8 --num-layers 4 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_d128_h8_l4_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --d-model 128 --nhead 8 --num-layers 5 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_d128_h8_l5_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --d-model 160 --nhead 8 --num-layers 5 --dim-feedforward 320 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_d160_h8_l5_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_d192_h8_l6_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_d192_h8_l6_lr2e4"
 
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
 
@@ -90,7 +109,7 @@ python -u rerun_best_sweep_with_plots.py \
   --output-root "${BEST}" \
   "${RERUN_DATA[@]}" \
   --value-column "${TARGET_COLUMN}" \
-  --use-all-numeric-features \
+  "${FEATURE_FLAGS[@]}" \
   ${COMMON_ROLLING} \
   ${COMMON_TRAIN} \
   ${COMMON_LOSS}
