@@ -26,6 +26,7 @@ COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}
 
 # --- Target smoothing BEFORE train/val/test splits (per CSV file) ---
 # Centered moving average length K on --value-column. K=1 disables.
+# Rolling-window PNGs use K-smoothed value history (input) and smoothed actuals on the horizon; predictions use raw model outputs unless COMMON_WIN sets pred-smoothing-window>1.
 # Example: sbatch --export=ALL,TARGET_SMOOTHING_WINDOW=7 run_arima_tuning.sbatch
 TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW:-1}
 TARGET_SMOOTH_FLAGS=()

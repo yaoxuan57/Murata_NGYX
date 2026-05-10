@@ -29,6 +29,7 @@ ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
 COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}"
 
 # Pre-split smoothing on --value-column (same as run_arima_tuning.sbatch): centered MA per CSV before windows.
+# Rolling-window PNGs plot that same smoothed value history (left) and smoothed horizons (actual); predictions are raw model outputs unless --pred-smoothing-window>1 is set in train args.
 # Example: sbatch --export=ALL,TARGET_SMOOTHING_WINDOW=7 run_dlinear_tuning.sbatch
 TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW:-1}
 TARGET_SMOOTH_FLAGS=()
@@ -44,7 +45,7 @@ fi
 #        sbatch --export=ALL,INPUT_FEATURES="Acceleration RMS;Kurtosis;Battery Voltage" run_dlinear_tuning.sbatch
 #   2) USE_ALL_NUMERIC_FEATURES=1 (default) uses every numeric column except TIMESTAMP / smoothed target.
 #        Set USE_ALL_NUMERIC_FEATURES=0 (and leave INPUT_FEATURES empty) to fall back to TARGET_COLUMN only.
-INPUT_FEATURES=${INPUT_FEATURES:-}
+INPUT_FEATURES=${INPUT_FEATURES:-Acceleration RMS;Kurtosis}
 USE_ALL_NUMERIC_FEATURES=${USE_ALL_NUMERIC_FEATURES:-0}
 if [ -n "${INPUT_FEATURES}" ]; then
   IFS=';' read -r -a INPUT_FEATURE_ARR <<< "${INPUT_FEATURES}"

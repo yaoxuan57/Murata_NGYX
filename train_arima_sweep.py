@@ -628,13 +628,8 @@ def main():
         horizon=1,
     ).to_csv(horizon_1_path, index=False)
 
-    raw_col = args.raw_compare_column
-    if isinstance(raw_col, str) and raw_col in df_plot_ref.columns:
-        rolling_input_hist = df_plot_ref[raw_col].to_numpy(dtype=np.float32)
-        rolling_input_label = raw_col
-    else:
-        rolling_input_hist = df_plot_ref[vc].to_numpy(dtype=np.float32)
-        rolling_input_label = str(args.value_column)
+    rolling_input_hist = df_plot_ref[vc].to_numpy(dtype=np.float32)
+    rolling_input_label = str(args.value_column)
 
     rolling_windows_dir, rolling_combined_csv_path = save_rolling_window_forecasts(
         output_dir=args.output_dir,

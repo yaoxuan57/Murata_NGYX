@@ -88,9 +88,11 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument(
         "--raw-compare-column",
         type=str,
-        default="Acceleration RMS",
-        help="Optional raw (unsmoothed) CSV column to render as a second panel in rolling-window PNGs. "
-        "If missing, the extra panel is skipped.",
+        default=None,
+        metavar="COLUMN",
+        help="Reserved/unused by current plotting code. Rolling-window PNGs plot the history of "
+        "--value-column exactly as used after optional --target-smoothing-window (aligned with "
+        "train/val/test). Forecast series are raw model outputs unless --pred-smoothing-window>1.",
     )
     parser.add_argument("--output-dir", type=str, default=default_output_dir)
     parser.add_argument("--seed", type=int, default=42)
@@ -694,7 +696,8 @@ def _plot_rolling_window_png(
     input_context_label: str = "Acceleration RMS",
     pred_smoothing_window: int = 1,
 ):
-    """Left: single input series (z-scored), e.g. raw Acceleration RMS; right: forecast horizon."""
+    """Left: history of target column (z-scored), same series as train/val/test after target pre-smoothing."""
+
     row0 = window_idx if input_row_start is None else int(input_row_start)
     hist = np.asarray(history_series_raw[row0 : row0 + input_len], dtype=np.float64)
     x_hist = np.arange(0, input_len, dtype=np.float64)
@@ -1752,13 +1755,10 @@ def run_sweep(
     fig.savefig(horizon_bias_png_path, dpi=140)
     plt.close(fig)
 
-    raw_col = args.raw_compare_column
-    if isinstance(raw_col, str) and raw_col in df_test.columns:
-        rolling_input_hist = df_test[raw_col].to_numpy(dtype=np.float32)
-        rolling_input_label = raw_col
-    else:
-        rolling_input_hist = test_series
-        rolling_input_label = str(args.value_column)
+    # Rolling-window input context matches training targets: --value-column after optional
+    # target pre-smoothing (not a separate raw column), so overlays stay coherent with horizons.
+    rolling_input_hist = test_series
+    rolling_input_label = str(args.value_column)
 
     rolling_windows_dir, rolling_combined_csv_path = save_rolling_window_forecasts(
         output_dir=args.output_dir,
