@@ -2,7 +2,8 @@
 #SBATCH -A prj0000000262
 #SBATCH -p testqueue
 #SBATCH -N 1
-#SBATCH --gpus=0
+# ARIMA is CPU-only, but queues like testqueue often require --gpus>0 or sbatch rejects the job.
+#SBATCH --gpus=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

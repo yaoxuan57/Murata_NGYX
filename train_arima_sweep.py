@@ -155,14 +155,6 @@ def parse_args():
         default=100,
         help="Max iterations for statsmodels ARIMA fit.",
     )
-    parser.add_argument(
-        "--target-smoothing-window",
-        type=int,
-        default=1,
-        metavar="K",
-        help="If K>1, apply centered length-K moving average to --value-column in each CSV "
-        "before building train/val/test windows (per file). K is bumped to odd if even. K=1 disables.",
-    )
     return parser.parse_args()
 
 

@@ -144,6 +144,15 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         help="If K>1, apply a centered length-K moving average to each test forecast row "
         "(raw model output) before metrics and saved plots/CSVs. K is bumped up by 1 if even. K=1 disables.",
     )
+    parser.add_argument(
+        "--target-smoothing-window",
+        type=int,
+        default=1,
+        metavar="K",
+        help="If K>1, apply a centered length-K moving average to --value-column in each loaded CSV "
+        "before building train/val/test windows (per file only; other feature columns unchanged). "
+        "K is bumped to odd if even. K=1 disables.",
+    )
     parser.add_argument("--save-window-plots", dest="save_window_plots", action="store_true")
     parser.add_argument("--no-window-plots", dest="save_window_plots", action="store_false")
     parser.set_defaults(save_window_plots=True)
@@ -235,6 +244,18 @@ def smooth_forecast_vector(vec: np.ndarray, window: int) -> np.ndarray:
     kernel = np.ones(w, dtype=np.float64) / w
     y_pad = np.pad(y, (pad, pad), mode="edge")
     return np.convolve(y_pad, kernel, mode="valid").astype(vec.dtype, copy=False)
+
+
+def smooth_target_series_1d(vec: np.ndarray, window: int) -> np.ndarray:
+    """Centered MA on a 1D target series (full CSV column) before sliding windows; edge padding."""
+    if window <= 1:
+        return np.asarray(vec, dtype=np.float32)
+    w = window if window % 2 == 1 else window + 1
+    pad = w // 2
+    y = np.asarray(vec, dtype=np.float64)
+    kernel = np.ones(w, dtype=np.float64) / w
+    y_pad = np.pad(y, (pad, pad), mode="edge")
+    return np.convolve(y_pad, kernel, mode="valid").astype(np.float32)
 
 
 def r2_np(y_true, y_pred):
@@ -998,6 +1019,27 @@ def run_sweep(
                 f"Available columns: {list(frame.columns)}"
             )
 
+    tw_pre = int(getattr(args, "target_smoothing_window", 1))
+    if tw_pre > 1:
+        w_pre = tw_pre if tw_pre % 2 == 1 else tw_pre + 1
+        print(
+            f"Target pre-smoothing: centered MA window={w_pre} on {vc!r} "
+            "(per CSV, applied before train/val/test windows)."
+        )
+
+        def _smooth_value_col(df: pd.DataFrame) -> None:
+            df[vc] = smooth_target_series_1d(df[vc].to_numpy(dtype=np.float32), w_pre)
+
+        if single_file_mode:
+            _smooth_value_col(df_all)
+        elif explicit_tv:
+            _smooth_value_col(df_train)
+            _smooth_value_col(df_val)
+            _smooth_value_col(df_test)
+        else:
+            _smooth_value_col(df_train_val)
+            _smooth_value_col(df_test)
+
     test_series = df_test[vc].to_numpy(dtype=np.float32)
     test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
 
@@ -1500,6 +1542,9 @@ def run_sweep(
     with open(metrics_path, "w", encoding="utf-8") as fp:
         json.dump(metrics_payload, fp, indent=2)
 
+    _ts_cfg = int(getattr(args, "target_smoothing_window", 1))
+    target_smooth_stored = int(1 if _ts_cfg <= 1 else (_ts_cfg if _ts_cfg % 2 == 1 else _ts_cfg + 1))
+
     best_config_path = os.path.join(args.output_dir, "best_config.json")
     best_config_payload = {
         "data_split_mode": (
@@ -1544,6 +1589,7 @@ def run_sweep(
         "loss_laplacian_weight": args.loss_laplacian_weight,
         "loss_tail_weight": float(args.loss_tail_weight),
         "pred_smoothing_window": args.pred_smoothing_window,
+        "target_smoothing_window": target_smooth_stored,
         "save_window_plots": args.save_window_plots,
         "rolling_window_artifact_limit": args.rolling_window_artifact_limit,
         "require_uniform_timestep": bool(args.require_uniform_timestep),
