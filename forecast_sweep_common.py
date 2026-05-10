@@ -128,6 +128,15 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         "(suppresses high-frequency jaggedness). Set 0 to disable.",
     )
     parser.add_argument(
+        "--loss-tail-weight",
+        type=float,
+        default=1.0,
+        help="Per-step loss weight at horizon=pred_len-1 (horizon 0 has weight 1.0). "
+        "Loss weights interpolate linearly from 1.0 (head) to this value (tail). "
+        "Default 1.0 = flat (no decay). Use <1.0 to down-weight late horizons "
+        "(historical default was 0.8, which let the tail drift up).",
+    )
+    parser.add_argument(
         "--pred-smoothing-window",
         type=int,
         default=1,
@@ -465,6 +474,7 @@ class TrajectoryAwareLoss(nn.Module):
         curvature_weight=0.8,
         variance_weight=0.4,
         laplacian_reg_weight=0.0,
+        tail_weight=1.0,
     ):
         super().__init__()
         self.delta = delta
@@ -473,7 +483,8 @@ class TrajectoryAwareLoss(nn.Module):
         self.curvature_weight = curvature_weight
         self.variance_weight = variance_weight
         self.laplacian_reg_weight = laplacian_reg_weight
-        w = torch.linspace(1.0, 0.8, pred_len, dtype=torch.float32)
+        self.tail_weight = float(tail_weight)
+        w = torch.linspace(1.0, self.tail_weight, pred_len, dtype=torch.float32)
         self.register_buffer("w", w / w.mean())
 
     def _weighted_huber(self, pred, target, weights):
@@ -1307,6 +1318,7 @@ def run_sweep(
                     curvature_weight=args.loss_curvature_weight,
                     variance_weight=args.loss_variance_weight,
                     laplacian_reg_weight=args.loss_laplacian_weight,
+                    tail_weight=args.loss_tail_weight,
                 ).to(device)
                 optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
                 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -1530,6 +1542,7 @@ def run_sweep(
         "loss_curvature_weight": args.loss_curvature_weight,
         "loss_variance_weight": args.loss_variance_weight,
         "loss_laplacian_weight": args.loss_laplacian_weight,
+        "loss_tail_weight": float(args.loss_tail_weight),
         "pred_smoothing_window": args.pred_smoothing_window,
         "save_window_plots": args.save_window_plots,
         "rolling_window_artifact_limit": args.rolling_window_artifact_limit,
@@ -1633,6 +1646,66 @@ def run_sweep(
         horizon=h + 1,
     ).to_csv(horizon_n_path, index=False)
 
+    preds_per_h = best_result["all_preds_raw"]
+    targets_per_h = best_result["all_targets_raw"]
+    horizon_arr = np.arange(1, best_pred_len + 1)
+    pred_mean_per_h = preds_per_h.mean(axis=0)
+    pred_std_per_h = preds_per_h.std(axis=0)
+    target_mean_per_h = targets_per_h.mean(axis=0)
+    target_std_per_h = targets_per_h.std(axis=0)
+    bias_per_h = pred_mean_per_h - target_mean_per_h
+    horizon_bias_df = pd.DataFrame(
+        {
+            "horizon": horizon_arr,
+            "pred_mean": pred_mean_per_h,
+            "pred_std": pred_std_per_h,
+            "target_mean": target_mean_per_h,
+            "target_std": target_std_per_h,
+            "bias_pred_minus_target": bias_per_h,
+        }
+    )
+    horizon_bias_csv_path = os.path.join(args.output_dir, "horizon_bias.csv")
+    horizon_bias_df.to_csv(horizon_bias_csv_path, index=False)
+
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    ax_top.plot(horizon_arr, target_mean_per_h, color="C0", label="Actual mean")
+    ax_top.fill_between(
+        horizon_arr,
+        target_mean_per_h - target_std_per_h,
+        target_mean_per_h + target_std_per_h,
+        color="C0",
+        alpha=0.15,
+        label="Actual ±1 std",
+    )
+    ax_top.plot(horizon_arr, pred_mean_per_h, color="C1", label="Predicted mean")
+    ax_top.fill_between(
+        horizon_arr,
+        pred_mean_per_h - pred_std_per_h,
+        pred_mean_per_h + pred_std_per_h,
+        color="C1",
+        alpha=0.15,
+        label="Predicted ±1 std",
+    )
+    ax_top.set_title(
+        f"Per-horizon mean & spread across {preds_per_h.shape[0]} test windows "
+        f"(INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len}, "
+        f"loss_tail_weight={float(args.loss_tail_weight):g})"
+    )
+    ax_top.set_ylabel(args.value_column)
+    ax_top.grid(True, alpha=0.35)
+    ax_top.legend(loc="best", fontsize=8)
+
+    ax_bot.axhline(0.0, color="0.55", linewidth=0.9)
+    ax_bot.plot(horizon_arr, bias_per_h, color="C3", label="Predicted - Actual (mean)")
+    ax_bot.set_xlabel("Horizon step")
+    ax_bot.set_ylabel("Mean bias")
+    ax_bot.grid(True, alpha=0.35)
+    ax_bot.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    horizon_bias_png_path = os.path.join(args.output_dir, "horizon_bias.png")
+    fig.savefig(horizon_bias_png_path, dpi=140)
+    plt.close(fig)
+
     raw_col = args.raw_compare_column
     if isinstance(raw_col, str) and raw_col in df_test.columns:
         rolling_input_hist = df_test[raw_col].to_numpy(dtype=np.float32)
@@ -1690,6 +1763,8 @@ def run_sweep(
     print(f"- {horizon_path}")
     print(f"- {horizon_1_path}")
     print(f"- {horizon_n_path}")
+    print(f"- {horizon_bias_csv_path}")
+    print(f"- {horizon_bias_png_path}")
     print(f"- {rolling_windows_dir}")
     print(f"- {rolling_combined_csv_path}")
     print(f"- {sample_path}")

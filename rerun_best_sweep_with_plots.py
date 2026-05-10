@@ -46,6 +46,13 @@ def parse_args():
         help="If set, passed through to the train script (per-window CSV/PNG cap). "
         "When omitted, uses best_config.rolling_window_artifact_limit when present.",
     )
+    parser.add_argument(
+        "--target-smoothing-window",
+        type=int,
+        default=None,
+        help="If set, passed to train_arima_sweep (pre-split target smoothing). "
+        "When omitted, uses best_config.target_smoothing_window when present.",
+    )
     return parser.parse_args()
 
 
@@ -189,6 +196,17 @@ def main():
     if rolling_limit is not None:
         cmd.extend(["--rolling-window-artifact-limit", str(rolling_limit)])
 
+    us = best_config.get("uniform_step_seconds")
+    ut = best_config.get("uniform_step_tolerance_seconds")
+    if us is not None:
+        cmd.extend(["--uniform-step-seconds", str(us)])
+    if ut is not None:
+        cmd.extend(["--uniform-step-tolerance-seconds", str(ut)])
+    if bool(best_config.get("require_uniform_timestep", True)):
+        cmd.append("--require-uniform-timestep")
+    else:
+        cmd.append("--no-require-uniform-timestep")
+
     append_optional(cmd, "--lr", lr)
     append_optional(cmd, "--weight-decay", weight_decay)
     value_column = best_config.get("value_column")
@@ -200,6 +218,11 @@ def main():
         cmd.extend([str(c) for c in feature_columns])
     if bool(best_config.get("use_all_numeric_features", False)):
         cmd.append("--use-all-numeric-features")
+    target_smooth = args.target_smoothing_window
+    if target_smooth is None:
+        target_smooth = best_config.get("target_smoothing_window")
+    if target_smooth is not None:
+        cmd.extend(["--target-smoothing-window", str(int(target_smooth))])
     cmd.extend(model_config_to_flags(model_config))
     cmd.extend(["--output-dir", out_dir])
 

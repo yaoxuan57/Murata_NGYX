@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH -t 5:00:00
+#SBATCH -t 10:00:00
 #SBATCH -J dlinear_tuning
 #SBATCH -o ~/logs/%x_%j.out
 #SBATCH -e ~/logs/%x_%j.err
@@ -20,7 +20,9 @@ UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-300}
 UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-30}
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
 COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
-COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2"
+# Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
+LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
+COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
 TARGET_COLUMN=${TARGET_COLUMN:-"Acceleration RMS"}
 # Per-window rolling CSV/PNG under rolling_window_forecasts/ (full series still in all_windows_forecasts.csv).
 ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
@@ -81,6 +83,14 @@ if [ "${DATA_FOLDER_NAME}" = "." ]; then
 else
   DATA_FOLDER_SUFFIX="_${DATA_FOLDER_NAME}"
 fi
+
+# Under sbatch, SLURM_JOB_ID is the scheduler job id — append so outputs never collide across submissions.
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  JOB_SUFFIX="_job${SLURM_JOB_ID}"
+else
+  JOB_SUFFIX=""
+fi
+
 # Toggle MoE mode from submission command:
 #   sbatch --export=USE_MOE=1,MOE_NUM_EXPERTS=4 run_dlinear_tuning.sbatch
 # Default is plain DLinear (USE_MOE=0).
@@ -95,12 +105,13 @@ if [ "${USE_MOE}" = "1" ]; then
     EXTRA_MODEL_ARGS="--num-experts ${MOE_NUM_EXPERTS}"
     RUN_TAG="moe_k${MOE_NUM_EXPERTS}"
 
-    ROOT="outputs_dlinear_tuning_${RUN_TAG}${DATA_FOLDER_SUFFIX}_${DATA_TAG}"
+    ROOT="outputs_dlinear_tuning_${RUN_TAG}${DATA_FOLDER_SUFFIX}_${DATA_TAG}${JOB_SUFFIX}"
     RUNS="${ROOT}/runs"
     BEST="${ROOT}/best_model"
     mkdir -p "${RUNS}" "${BEST}"
 
     echo "Running MoE tuning with ${MOE_NUM_EXPERTS} experts -> ${RUN_TAG}"
+    echo "Output directory root: ${ROOT}"
 
     # 1) Run candidate configs and save window plots for each candidate.
     python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${EXTRA_MODEL_ARGS} ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4_moe${MOE_NUM_EXPERTS}"
@@ -146,10 +157,12 @@ else
   TRAIN_SCRIPT="train_dlinear_sweep.py"
   RUN_TAG="dlinear"
 
-  ROOT="outputs_dlinear_tuning_${RUN_TAG}${DATA_FOLDER_SUFFIX}_${DATA_TAG}"
+  ROOT="outputs_dlinear_tuning_${RUN_TAG}${DATA_FOLDER_SUFFIX}_${DATA_TAG}${JOB_SUFFIX}"
   RUNS="${ROOT}/runs"
   BEST="${ROOT}/best_model"
   mkdir -p "${RUNS}" "${BEST}"
+
+  echo "Output directory root: ${ROOT}"
 
   # 1) Run candidate configs and save window plots for each candidate.
   python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_k11_lr5e4"

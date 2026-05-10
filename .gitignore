@@ -5,3 +5,11 @@
 *.pth
 *.json
 *.html
+
+# Slurm / training logs
+*.out
+*.err
+*.log
+logs/
+~/
+~\
