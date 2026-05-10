@@ -278,6 +278,48 @@ def evaluate_metrics(y_true, y_pred):
     }
 
 
+# Contiguous horizon bands for reporting (near-equal width). Forecast steps are 1-based (step-ahead index).
+HORIZON_PHASE_COUNT = 5
+
+
+def horizon_phase_step_ranges(pred_len: int, n_phases: int = HORIZON_PHASE_COUNT):
+    """Return list of (h_start, h_end) inclusive 1-based step-ahead indices per phase; empty phases -> (None, None)."""
+    splits = np.array_split(np.arange(pred_len), n_phases)
+    ranges = []
+    for part in splits:
+        if part.size == 0:
+            ranges.append((None, None))
+        else:
+            ranges.append((int(part[0]) + 1, int(part[-1]) + 1))
+    return ranges
+
+
+def compute_horizon_phase_mapes(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    n_phases: int = HORIZON_PHASE_COUNT,
+):
+    """
+    Test MAPE (%) per horizon phase: same formula as global test MAPE, pooling all test windows
+    and all timesteps whose step-ahead index falls in that phase.
+    """
+    pred_len = int(y_true.shape[1])
+    splits = np.array_split(np.arange(pred_len), n_phases)
+    mapes = []
+    for part in splits:
+        if part.size == 0:
+            mapes.append(float("nan"))
+            continue
+        a, b = int(part[0]), int(part[-1]) + 1
+        mapes.append(mape_np(y_true[:, a:b].ravel(), y_pred[:, a:b].ravel()))
+    return mapes
+
+
+def horizon_phase_ranges_csv_string(ranges: list) -> str:
+    parts = [f"{lo}-{hi}" for lo, hi in ranges if lo is not None and hi is not None]
+    return ";".join(parts)
+
+
 def parse_timestamp_series(series: pd.Series, name: str) -> pd.Series:
     raw = series.astype(str).str.strip()
     parsed = pd.to_datetime(raw, format="%Y-%m-%d %H:%M:%S", errors="coerce")
@@ -1436,6 +1478,8 @@ def run_sweep(
                 metrics = evaluate_metrics(all_targets_raw, all_preds_raw)
                 baseline = baseline_rmse(test_loader, pred_len, train_std, train_mean)
                 horizon_rmse = [rmse_np(all_targets_raw[:, h], all_preds_raw[:, h]) for h in range(pred_len)]
+                horizon_phase_mape = compute_horizon_phase_mapes(all_targets_raw, all_preds_raw)
+                horizon_phase_h_ranges = horizon_phase_step_ranges(pred_len)
 
                 sample_idx = min(args.plot_sample_idx, len(test_dataset) - 1)
                 x, y_delta, last_val = test_dataset[sample_idx]
@@ -1462,6 +1506,8 @@ def run_sweep(
                         "metrics": metrics,
                         "baseline_rmse": baseline,
                         "horizon_rmse": horizon_rmse,
+                        "horizon_phase_mape": horizon_phase_mape,
+                        "horizon_phase_h_ranges": horizon_phase_h_ranges,
                         "all_preds_raw": all_preds_raw,
                         "all_targets_raw": all_targets_raw,
                         "sample_pred_raw": pred_raw,
@@ -1478,23 +1524,27 @@ def run_sweep(
     if not experiment_results:
         raise RuntimeError("No valid experiment completed. Reduce INPUT_LEN or PRED_LEN.")
 
-    summary_df = pd.DataFrame(
-        [
-            {
-                "input_len": result["input_len"],
-                "pred_len": result["pred_len"],
-                "best_val_loss": result["best_val_loss"],
-                "best_val_window_rmse": result["best_val_window_rmse"],
-                "test_mse": result["metrics"]["mse"],
-                "test_rmse": result["metrics"]["rmse"],
-                "test_mae": result["metrics"]["mae"],
-                "test_mape": result["metrics"]["mape"],
-                "test_r2": result["metrics"]["r2"],
-                "baseline_rmse": result["baseline_rmse"],
-            }
-            for result in experiment_results
-        ]
-    ).sort_values(by="best_val_window_rmse").reset_index(drop=True)
+    def _phase_mape_row(result):
+        row = {
+            "input_len": result["input_len"],
+            "pred_len": result["pred_len"],
+            "best_val_loss": result["best_val_loss"],
+            "best_val_window_rmse": result["best_val_window_rmse"],
+            "test_mse": result["metrics"]["mse"],
+            "test_rmse": result["metrics"]["rmse"],
+            "test_mae": result["metrics"]["mae"],
+            "test_mape": result["metrics"]["mape"],
+            "test_r2": result["metrics"]["r2"],
+            "baseline_rmse": result["baseline_rmse"],
+            "test_mape_horizon_phases": horizon_phase_ranges_csv_string(result["horizon_phase_h_ranges"]),
+        }
+        for p in range(HORIZON_PHASE_COUNT):
+            row[f"test_mape_phase_{p + 1}"] = result["horizon_phase_mape"][p]
+        return row
+
+    summary_df = pd.DataFrame([_phase_mape_row(r) for r in experiment_results]).sort_values(
+        by="best_val_window_rmse"
+    ).reset_index(drop=True)
 
     summary_path = os.path.join(args.output_dir, "experiment_summary.csv")
     summary_df.to_csv(summary_path, index=False)
@@ -1541,6 +1591,13 @@ def run_sweep(
         "baseline_rmse": float(best_result["baseline_rmse"]),
         "train_mean": float(best_result["train_mean"]),
         "train_std": float(best_result["train_std"]),
+        "horizon_phase_mape_pct": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_mape"]
+        ],
+        "horizon_phase_step_ranges_1based": [
+            {"h_start": a, "h_end": b, "mape_pct": float(m) if np.isfinite(m) else None}
+            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_mape"])
+        ],
     }
     with open(metrics_path, "w", encoding="utf-8") as fp:
         json.dump(metrics_payload, fp, indent=2)
@@ -1607,6 +1664,13 @@ def run_sweep(
         "test_mae": float(best_result["metrics"]["mae"]),
         "test_mape": float(best_result["metrics"]["mape"]),
         "test_r2": float(best_result["metrics"]["r2"]),
+        "horizon_phase_mape_pct": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_mape"]
+        ],
+        "horizon_phase_step_ranges_1based": [
+            {"h_start": a, "h_end": b, "mape_pct": float(m) if np.isfinite(m) else None}
+            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_mape"])
+        ],
     }
     with open(best_config_path, "w", encoding="utf-8") as fp:
         json.dump(best_config_payload, fp, indent=2)
@@ -1618,6 +1682,19 @@ def run_sweep(
             "rmse": best_result["horizon_rmse"],
         }
     ).to_csv(horizon_path, index=False)
+
+    phase_mape_csv = os.path.join(args.output_dir, "best_horizon_phase_mape.csv")
+    pd.DataFrame(
+        [
+            {
+                "phase": i + 1,
+                "h_start": best_result["horizon_phase_h_ranges"][i][0],
+                "h_end": best_result["horizon_phase_h_ranges"][i][1],
+                "mape_pct": best_result["horizon_phase_mape"][i],
+            }
+            for i in range(HORIZON_PHASE_COUNT)
+        ]
+    ).to_csv(phase_mape_csv, index=False)
 
     sample_path = os.path.join(args.output_dir, "best_sample_forecast.csv")
     pd.DataFrame(
@@ -1801,12 +1878,25 @@ def run_sweep(
     for i, horizon_rmse in enumerate(best_result["horizon_rmse"], start=1):
         print(f"Horizon {i:02d} RMSE: {horizon_rmse:.6f}")
 
+    print(
+        "\nTest MAPE by horizon phase "
+        f"({HORIZON_PHASE_COUNT} contiguous bands over 1..PRED_LEN, pooled over test windows):"
+    )
+    for i in range(HORIZON_PHASE_COUNT):
+        hs, he = best_result["horizon_phase_h_ranges"][i]
+        mp = best_result["horizon_phase_mape"][i]
+        if hs is None or not np.isfinite(mp):
+            print(f"  Phase {i + 1}: (empty) MAPE=n/a")
+        else:
+            print(f"  Phase {i + 1} (steps {hs}-{he}): MAPE={mp:.6f}%")
+
     print("\nSaved artifacts:")
     print(f"- {summary_path}")
     print(f"- {history_path}")
     print(f"- {metrics_path}")
     print(f"- {best_config_path}")
     print(f"- {horizon_path}")
+    print(f"- {phase_mape_csv}")
     print(f"- {horizon_1_path}")
     print(f"- {horizon_n_path}")
     print(f"- {horizon_bias_csv_path}")

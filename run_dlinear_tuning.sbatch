@@ -31,7 +31,7 @@ COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}
 # Pre-split smoothing on --value-column (same as run_arima_tuning.sbatch): centered MA per CSV before windows.
 # Rolling-window PNGs plot that same smoothed value history (left) and smoothed horizons (actual); predictions are raw model outputs unless --pred-smoothing-window>1 is set in train args.
 # Example: sbatch --export=ALL,TARGET_SMOOTHING_WINDOW=7 run_dlinear_tuning.sbatch
-TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW:-1}
+TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW:-7}
 TARGET_SMOOTH_FLAGS=()
 if [ "${TARGET_SMOOTHING_WINDOW}" -gt 1 ] 2>/dev/null; then
   TARGET_SMOOTH_FLAGS=(--target-smoothing-window "${TARGET_SMOOTHING_WINDOW}")
