@@ -14,19 +14,19 @@ def parse_args():
         "--objective",
         type=str,
         default="auto",
-        help="Ranking metric. Use 'auto' to prefer best_val_window_rmse, then best_val_loss.",
+        help="Ranking metric. Use 'auto' to prefer best_val_loss (composite), then best_val_window_rmse.",
     )
     return parser.parse_args()
 
 
 def infer_objective(summary_df: pd.DataFrame) -> str:
-    if "best_val_window_rmse" in summary_df.columns:
-        return "best_val_window_rmse"
     if "best_val_loss" in summary_df.columns:
         return "best_val_loss"
+    if "best_val_window_rmse" in summary_df.columns:
+        return "best_val_window_rmse"
     raise RuntimeError(
         "Could not infer ranking metric from experiment_summary.csv. "
-        "Expected best_val_window_rmse or best_val_loss."
+        "Expected best_val_loss or best_val_window_rmse."
     )
 
 
@@ -83,6 +83,8 @@ def collect_run_rows(runs_root: str, objective_arg: str) -> pd.DataFrame:
             "test_mae": to_float_or_none(best_row.get("test_mae")),
             "test_mape": to_float_or_none(best_row.get("test_mape")),
             "test_r2": to_float_or_none(best_row.get("test_r2")),
+            "test_composite_loss": to_float_or_none(best_row.get("test_composite_loss")),
+            "test_composite_loss_pct": to_float_or_none(best_row.get("test_composite_loss_pct")),
             "lr": to_float_or_none(cfg.get("lr")),
             "weight_decay": to_float_or_none(cfg.get("weight_decay")),
             "save_window_plots": cfg.get("save_window_plots"),

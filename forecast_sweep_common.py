@@ -1435,7 +1435,7 @@ def run_sweep(
                     train_loss = run_epoch(model, train_loader, criterion, optimizer, device)
                     val_loss = run_epoch(model, val_loader, criterion, optimizer=None, device=device)
                     val_window_rmse = compute_window_rmse(model, val_loader, train_std, train_mean, device)
-                    scheduler.step(val_window_rmse)
+                    scheduler.step(val_loss)
                     current_lr = optimizer.param_groups[0]["lr"]
 
                     history.append(
@@ -1453,9 +1453,9 @@ def run_sweep(
                         f"| val_window_rmse={val_window_rmse:.6f} | lr={current_lr:.2e}"
                     )
 
-                    if val_window_rmse < best_val_window_rmse - args.min_delta:
-                        best_val_window_rmse = val_window_rmse
+                    if val_loss < best_val_loss - args.min_delta:
                         best_val_loss = val_loss
+                        best_val_window_rmse = val_window_rmse
                         best_state = copy.deepcopy(model.state_dict())
                         patience_counter = 0
                     else:
@@ -1466,6 +1466,11 @@ def run_sweep(
 
                 model.load_state_dict(best_state)
                 model.eval()
+
+                test_composite_loss = run_epoch(
+                    model, test_loader, criterion, optimizer=None, device=device
+                )
+                test_composite_loss_pct = float(test_composite_loss) * 100.0
 
                 all_preds_raw, all_targets_raw = collect_predictions(model, test_loader, train_std, train_mean, device)
                 if args.pred_smoothing_window > 1:
@@ -1497,6 +1502,8 @@ def run_sweep(
                         "model_state_dict": copy.deepcopy(model.state_dict()),
                         "best_val_loss": best_val_loss,
                         "best_val_window_rmse": best_val_window_rmse,
+                        "test_composite_loss": float(test_composite_loss),
+                        "test_composite_loss_pct": float(test_composite_loss_pct),
                         "history": pd.DataFrame(history),
                         "metrics": metrics,
                         "baseline_rmse": baseline,
@@ -1525,6 +1532,8 @@ def run_sweep(
             "pred_len": result["pred_len"],
             "best_val_loss": result["best_val_loss"],
             "best_val_window_rmse": result["best_val_window_rmse"],
+            "test_composite_loss": result["test_composite_loss"],
+            "test_composite_loss_pct": result["test_composite_loss_pct"],
             "test_mse": result["metrics"]["mse"],
             "test_rmse": result["metrics"]["rmse"],
             "test_mae": result["metrics"]["mae"],
@@ -1538,7 +1547,7 @@ def run_sweep(
         return row
 
     summary_df = pd.DataFrame([_phase_mape_row(r) for r in experiment_results]).sort_values(
-        by="best_val_window_rmse"
+        by="best_val_loss"
     ).reset_index(drop=True)
 
     summary_path = os.path.join(args.output_dir, "experiment_summary.csv")
@@ -1547,7 +1556,7 @@ def run_sweep(
     print(summary_df)
     print(f"Saved summary to: {summary_path}")
 
-    best_result = min(experiment_results, key=lambda item: item["best_val_window_rmse"])
+    best_result = min(experiment_results, key=lambda item: item["best_val_loss"])
     best_input_len = best_result["input_len"]
     best_pred_len = best_result["pred_len"]
 
@@ -1555,6 +1564,8 @@ def run_sweep(
         f"\nBest config -> INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len}, "
         f"best_val_loss={best_result['best_val_loss']:.6f}, "
         f"best_val_window_rmse={best_result['best_val_window_rmse']:.6f}, "
+        f"test_composite_loss={best_result['test_composite_loss']:.6f} "
+        f"(×100={best_result['test_composite_loss_pct']:.4f}), "
         f"test_rmse={best_result['metrics']['rmse']:.6f}"
     )
 
@@ -1582,6 +1593,8 @@ def run_sweep(
         "best_pred_len": int(best_pred_len),
         "best_val_loss": float(best_result["best_val_loss"]),
         "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
+        "test_composite_loss": float(best_result["test_composite_loss"]),
+        "test_composite_loss_pct": float(best_result["test_composite_loss_pct"]),
         "metrics": best_result["metrics"],
         "baseline_rmse": float(best_result["baseline_rmse"]),
         "train_mean": float(best_result["train_mean"]),
@@ -1654,6 +1667,8 @@ def run_sweep(
         "best_pred_len": int(best_pred_len),
         "model_config": model_config_factory(args, best_input_len, best_pred_len),
         "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
+        "test_composite_loss": float(best_result["test_composite_loss"]),
+        "test_composite_loss_pct": float(best_result["test_composite_loss_pct"]),
         "test_rmse": float(best_result["metrics"]["rmse"]),
         "test_mse": float(best_result["metrics"]["mse"]),
         "test_mae": float(best_result["metrics"]["mae"]),
@@ -1862,6 +1877,11 @@ def run_sweep(
     )
 
     print("\nBest-run metrics:")
+    print(
+        f"Test composite (TrajectoryAware, normalized abs traj): "
+        f"{best_result['test_composite_loss']:.6f}  "
+        f"| loss×100 = {best_result['test_composite_loss_pct']:.4f}%"
+    )
     print(f"Test MSE : {best_result['metrics']['mse']:.6f}")
     print(f"Test RMSE: {best_result['metrics']['rmse']:.6f}")
     print(f"Test MAE : {best_result['metrics']['mae']:.6f}")

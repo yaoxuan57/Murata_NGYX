@@ -7,7 +7,9 @@ import pandas as pd
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Select best DLinear run by validation window RMSE")
+    parser = argparse.ArgumentParser(
+        description="Select best DLinear run by validation composite loss (best_val_loss), else val window RMSE."
+    )
     parser.add_argument("--runs-root", type=str, required=True)
     parser.add_argument("--out-json", type=str, default="best_run_selection.json")
     return parser.parse_args()
@@ -34,7 +36,8 @@ def collect_run_rows(runs_root: str) -> pd.DataFrame:
         if summary_df.empty:
             continue
 
-        best_row = summary_df.sort_values("best_val_window_rmse").iloc[0].to_dict()
+        sort_key = "best_val_loss" if "best_val_loss" in summary_df.columns else "best_val_window_rmse"
+        best_row = summary_df.sort_values(sort_key).iloc[0].to_dict()
         with open(cfg_path, "r", encoding="utf-8") as fp:
             cfg = json.load(fp)
 
@@ -42,7 +45,16 @@ def collect_run_rows(runs_root: str) -> pd.DataFrame:
             {
                 "run_name": run_name,
                 "run_dir": run_dir,
+                "best_val_loss": float(best_row["best_val_loss"])
+                if pd.notna(best_row.get("best_val_loss"))
+                else None,
                 "best_val_window_rmse": float(best_row["best_val_window_rmse"]),
+                "test_composite_loss": float(best_row["test_composite_loss"])
+                if pd.notna(best_row.get("test_composite_loss"))
+                else None,
+                "test_composite_loss_pct": float(best_row["test_composite_loss_pct"])
+                if pd.notna(best_row.get("test_composite_loss_pct"))
+                else None,
                 "test_mse": float(best_row["test_mse"]),
                 "test_rmse": float(best_row["test_rmse"]),
                 "test_mae": float(best_row["test_mae"]),
@@ -67,7 +79,12 @@ def collect_run_rows(runs_root: str) -> pd.DataFrame:
     if not rows:
         raise RuntimeError("No completed runs found. Missing experiment_summary.csv or best_config.json.")
 
-    return pd.DataFrame(rows).sort_values("best_val_window_rmse").reset_index(drop=True)
+    df_r = pd.DataFrame(rows)
+    if "best_val_loss" in df_r.columns and df_r["best_val_loss"].notna().all():
+        rank_col = "best_val_loss"
+    else:
+        rank_col = "best_val_window_rmse"
+    return df_r.sort_values(rank_col).reset_index(drop=True)
 
 
 def main():
@@ -88,7 +105,11 @@ def main():
     print("Saved ranking:", ranking_path)
     print("Saved best run selection:", out_path)
     print("Best run:", best["run_name"])
+    if best.get("best_val_loss") is not None:
+        print("best_val_loss (composite):", best["best_val_loss"])
     print("best_val_window_rmse:", best["best_val_window_rmse"])
+    if best.get("test_composite_loss_pct") is not None:
+        print("test_composite_loss_pct (loss×100):", best["test_composite_loss_pct"])
 
 
 if __name__ == "__main__":
