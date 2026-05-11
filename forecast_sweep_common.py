@@ -383,10 +383,10 @@ def compute_horizon_phase_composite_losses(
     n_phases: int = HORIZON_PHASE_COUNT,
 ):
     """TrajectoryAware composite on each contiguous phase (normalized abs traj), pooled over windows."""
-    pred_len = int(y_true_raw.shape[1])
-    y_p = (y_pred_raw - train_mean) / train_std
-    y_t = (y_true_raw - train_mean) / train_std
-    splits = np.array_split(np.arange(pred_len), n_phases)
+    y_p = (np.asarray(y_pred_raw, dtype=np.float64) - train_mean) / train_std
+    y_t = (np.asarray(y_true_raw, dtype=np.float64) - train_mean) / train_std
+    n_steps = int(y_t.shape[1])
+    splits = np.array_split(np.arange(n_steps, dtype=np.int64), n_phases)
     values = []
     for part in splits:
         if part.size == 0:
