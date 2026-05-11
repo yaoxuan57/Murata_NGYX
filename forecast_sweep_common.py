@@ -279,7 +279,7 @@ def evaluate_metrics(y_true, y_pred):
 
 
 # Contiguous horizon bands for reporting (near-equal width). Forecast steps are 1-based (step-ahead index).
-HORIZON_PHASE_COUNT = 5
+HORIZON_PHASE_COUNT = 6
 
 
 def horizon_phase_step_ranges(pred_len: int, n_phases: int = HORIZON_PHASE_COUNT):
