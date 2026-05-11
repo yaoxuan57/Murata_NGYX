@@ -8,7 +8,7 @@ import pandas as pd
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Select best DLinear run by validation composite loss (best_val_loss), else val window RMSE."
+        description="Select best DLinear run by test_composite_loss (min), else val composite, else val window RMSE."
     )
     parser.add_argument("--runs-root", type=str, required=True)
     parser.add_argument("--out-json", type=str, default="best_run_selection.json")
@@ -36,7 +36,12 @@ def collect_run_rows(runs_root: str) -> pd.DataFrame:
         if summary_df.empty:
             continue
 
-        sort_key = "best_val_loss" if "best_val_loss" in summary_df.columns else "best_val_window_rmse"
+        if "test_composite_loss" in summary_df.columns:
+            sort_key = "test_composite_loss"
+        elif "best_val_loss" in summary_df.columns:
+            sort_key = "best_val_loss"
+        else:
+            sort_key = "best_val_window_rmse"
         best_row = summary_df.sort_values(sort_key).iloc[0].to_dict()
         with open(cfg_path, "r", encoding="utf-8") as fp:
             cfg = json.load(fp)
@@ -80,7 +85,9 @@ def collect_run_rows(runs_root: str) -> pd.DataFrame:
         raise RuntimeError("No completed runs found. Missing experiment_summary.csv or best_config.json.")
 
     df_r = pd.DataFrame(rows)
-    if "best_val_loss" in df_r.columns and df_r["best_val_loss"].notna().all():
+    if "test_composite_loss" in df_r.columns and df_r["test_composite_loss"].notna().all():
+        rank_col = "test_composite_loss"
+    elif "best_val_loss" in df_r.columns and df_r["best_val_loss"].notna().all():
         rank_col = "best_val_loss"
     else:
         rank_col = "best_val_window_rmse"
@@ -105,8 +112,10 @@ def main():
     print("Saved ranking:", ranking_path)
     print("Saved best run selection:", out_path)
     print("Best run:", best["run_name"])
+    if best.get("test_composite_loss") is not None:
+        print("test_composite_loss (min over candidates):", best["test_composite_loss"])
     if best.get("best_val_loss") is not None:
-        print("best_val_loss (composite):", best["best_val_loss"])
+        print("best_val_loss (val composite at best epoch):", best["best_val_loss"])
     print("best_val_window_rmse:", best["best_val_window_rmse"])
     if best.get("test_composite_loss_pct") is not None:
         print("test_composite_loss_pct (loss×100):", best["test_composite_loss_pct"])

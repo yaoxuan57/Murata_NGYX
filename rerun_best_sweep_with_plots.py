@@ -99,7 +99,8 @@ def append_optional(cmd, flag, value):
 
 def model_config_to_flags(model_config):
     args = []
-    skip = {"model_type", "input_len", "pred_len"}
+    # input_dim is resolved from --feature-columns / CSV at train time, not a train_*_sweep CLI flag.
+    skip = {"model_type", "input_len", "pred_len", "input_dim"}
     for key, value in model_config.items():
         if key in skip:
             continue

@@ -294,25 +294,130 @@ def horizon_phase_step_ranges(pred_len: int, n_phases: int = HORIZON_PHASE_COUNT
     return ranges
 
 
-def compute_horizon_phase_mapes(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
+def trajectory_composite_loss_np(
+    pred: np.ndarray,
+    target: np.ndarray,
+    delta: float,
+    point_weight: float,
+    diff_weight: float,
+    curvature_weight: float,
+    variance_weight: float,
+    laplacian_reg_weight: float,
+    tail_weight: float,
+) -> float:
+    """Same weighted sum as TrajectoryAwareLoss (mean over batch). pred/target (N, L) normalized abs traj."""
+    pred = np.asarray(pred, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if pred.shape != target.shape:
+        raise ValueError(f"pred/target shape mismatch {pred.shape} vs {target.shape}")
+    _n, L = pred.shape
+    if L == 0:
+        return float("nan")
+
+    w = np.linspace(1.0, float(tail_weight), L, dtype=np.float64)
+    w = w / np.mean(w)
+
+    def weighted_huber(p: np.ndarray, t: np.ndarray, weights: np.ndarray) -> float:
+        if p.size == 0:
+            return 0.0
+        err = p - t
+        ae = np.abs(err)
+        huber = np.where(ae < delta, 0.5 * err**2, delta * (ae - 0.5 * delta))
+        return float(np.mean(huber * weights))
+
+    point_loss = weighted_huber(pred, target, w)
+
+    if L >= 2:
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        diff_weights = w[1:]
+        diff_loss = weighted_huber(pred_diff, target_diff, diff_weights)
+    else:
+        diff_loss = 0.0
+
+    if L >= 3:
+        pred_curvature = pred_diff[:, 1:] - pred_diff[:, :-1]
+        target_curvature = target_diff[:, 1:] - target_diff[:, :-1]
+        curvature_weights = w[2:]
+        curvature_loss = weighted_huber(pred_curvature, target_curvature, curvature_weights)
+    else:
+        curvature_loss = 0.0
+
+    pred_std = pred.std(axis=1, ddof=0)
+    target_std = target.std(axis=1, ddof=0)
+    variance_loss = float(np.mean(np.abs(pred_std - target_std)))
+
+    if laplacian_reg_weight > 0 and L >= 3:
+        d2_pred = pred[:, 2:] - 2.0 * pred[:, 1:-1] + pred[:, :-2]
+        laplacian_reg = float(np.mean(d2_pred**2))
+    else:
+        laplacian_reg = 0.0
+
+    return float(
+        point_weight * point_loss
+        + diff_weight * diff_loss
+        + curvature_weight * curvature_loss
+        + variance_weight * variance_loss
+        + laplacian_reg_weight * laplacian_reg
+    )
+
+
+def _loss_kwargs_from_args(args) -> dict:
+    return {
+        "delta": float(args.loss_huber_delta),
+        "point_weight": float(args.loss_point_weight),
+        "diff_weight": float(args.loss_diff_weight),
+        "curvature_weight": float(args.loss_curvature_weight),
+        "variance_weight": float(args.loss_variance_weight),
+        "laplacian_reg_weight": float(args.loss_laplacian_weight),
+        "tail_weight": float(args.loss_tail_weight),
+    }
+
+
+def compute_horizon_phase_composite_losses(
+    y_true_raw: np.ndarray,
+    y_pred_raw: np.ndarray,
+    train_mean: float,
+    train_std: float,
+    loss_kwargs: dict,
     n_phases: int = HORIZON_PHASE_COUNT,
 ):
-    """
-    Test MAPE (%) per horizon phase: same formula as global test MAPE, pooling all test windows
-    and all timesteps whose step-ahead index falls in that phase.
-    """
-    pred_len = int(y_true.shape[1])
+    """TrajectoryAware composite on each contiguous phase (normalized abs traj), pooled over windows."""
+    y_p = (y_pred_raw - train_mean) / train_std
+    y_t = (y_true_raw - train_mean) / train_std
     splits = np.array_split(np.arange(pred_len), n_phases)
-    mapes = []
+    values = []
     for part in splits:
         if part.size == 0:
-            mapes.append(float("nan"))
+            values.append(float("nan"))
             continue
         a, b = int(part[0]), int(part[-1]) + 1
-        mapes.append(mape_np(y_true[:, a:b].ravel(), y_pred[:, a:b].ravel()))
-    return mapes
+        values.append(trajectory_composite_loss_np(y_p[:, a:b], y_t[:, a:b], **loss_kwargs))
+    return values
+
+
+def compute_horizon_sliding_composite_losses(
+    y_true_raw: np.ndarray,
+    y_pred_raw: np.ndarray,
+    train_mean: float,
+    train_std: float,
+    loss_kwargs: dict,
+    window_size: int = 7,
+):
+    """Local composite loss centered at each step-ahead index (normalized traj); window length capped by pred_len."""
+    pred_len = int(y_true_raw.shape[1])
+    y_p = (y_pred_raw - train_mean) / train_std
+    y_t = (y_true_raw - train_mean) / train_std
+    W = min(window_size if window_size % 2 == 1 else window_size - 1, pred_len)
+    if W < 1:
+        W = 1
+    half = W // 2
+    out = []
+    for h in range(pred_len):
+        lo = max(0, min(h - half, pred_len - W))
+        hi = lo + W
+        out.append(trajectory_composite_loss_np(y_p[:, lo:hi], y_t[:, lo:hi], **loss_kwargs))
+    return out
 
 
 def horizon_phase_ranges_csv_string(ranges: list) -> str:
@@ -1477,8 +1582,21 @@ def run_sweep(
                     all_preds_raw = smooth_forecast_horizons(all_preds_raw, args.pred_smoothing_window)
                 metrics = evaluate_metrics(all_targets_raw, all_preds_raw)
                 baseline = baseline_rmse(test_loader, pred_len, train_std, train_mean)
-                horizon_rmse = [rmse_np(all_targets_raw[:, h], all_preds_raw[:, h]) for h in range(pred_len)]
-                horizon_phase_mape = compute_horizon_phase_mapes(all_targets_raw, all_preds_raw)
+                _lk = _loss_kwargs_from_args(args)
+                horizon_composite = compute_horizon_sliding_composite_losses(
+                    all_targets_raw,
+                    all_preds_raw,
+                    float(train_mean),
+                    float(train_std),
+                    _lk,
+                )
+                horizon_phase_composite = compute_horizon_phase_composite_losses(
+                    all_targets_raw,
+                    all_preds_raw,
+                    float(train_mean),
+                    float(train_std),
+                    _lk,
+                )
                 horizon_phase_h_ranges = horizon_phase_step_ranges(pred_len)
 
                 sample_idx = min(args.plot_sample_idx, len(test_dataset) - 1)
@@ -1507,8 +1625,8 @@ def run_sweep(
                         "history": pd.DataFrame(history),
                         "metrics": metrics,
                         "baseline_rmse": baseline,
-                        "horizon_rmse": horizon_rmse,
-                        "horizon_phase_mape": horizon_phase_mape,
+                        "horizon_composite": horizon_composite,
+                        "horizon_phase_composite": horizon_phase_composite,
                         "horizon_phase_h_ranges": horizon_phase_h_ranges,
                         "all_preds_raw": all_preds_raw,
                         "all_targets_raw": all_targets_raw,
@@ -1526,7 +1644,7 @@ def run_sweep(
     if not experiment_results:
         raise RuntimeError("No valid experiment completed. Reduce INPUT_LEN or PRED_LEN.")
 
-    def _phase_mape_row(result):
+    def _phase_composite_summary_row(result):
         row = {
             "input_len": result["input_len"],
             "pred_len": result["pred_len"],
@@ -1540,14 +1658,16 @@ def run_sweep(
             "test_mape": result["metrics"]["mape"],
             "test_r2": result["metrics"]["r2"],
             "baseline_rmse": result["baseline_rmse"],
-            "test_mape_horizon_phases": horizon_phase_ranges_csv_string(result["horizon_phase_h_ranges"]),
+            "test_composite_horizon_phases": horizon_phase_ranges_csv_string(result["horizon_phase_h_ranges"]),
         }
         for p in range(HORIZON_PHASE_COUNT):
-            row[f"test_mape_phase_{p + 1}"] = result["horizon_phase_mape"][p]
+            v = result["horizon_phase_composite"][p]
+            row[f"test_composite_phase_{p + 1}"] = v
+            row[f"test_composite_phase_{p + 1}_pct"] = float(v) * 100.0 if np.isfinite(v) else float("nan")
         return row
 
-    summary_df = pd.DataFrame([_phase_mape_row(r) for r in experiment_results]).sort_values(
-        by="best_val_loss"
+    summary_df = pd.DataFrame([_phase_composite_summary_row(r) for r in experiment_results]).sort_values(
+        by="test_composite_loss"
     ).reset_index(drop=True)
 
     summary_path = os.path.join(args.output_dir, "experiment_summary.csv")
@@ -1556,7 +1676,7 @@ def run_sweep(
     print(summary_df)
     print(f"Saved summary to: {summary_path}")
 
-    best_result = min(experiment_results, key=lambda item: item["best_val_loss"])
+    best_result = min(experiment_results, key=lambda item: item["test_composite_loss"])
     best_input_len = best_result["input_len"]
     best_pred_len = best_result["pred_len"]
 
@@ -1565,7 +1685,8 @@ def run_sweep(
         f"best_val_loss={best_result['best_val_loss']:.6f}, "
         f"best_val_window_rmse={best_result['best_val_window_rmse']:.6f}, "
         f"test_composite_loss={best_result['test_composite_loss']:.6f} "
-        f"(×100={best_result['test_composite_loss_pct']:.4f}), "
+        f"(loss×100={best_result['test_composite_loss_pct']:.4f}) "
+        f"[sweep winner = min test_composite; per-run checkpoint from val composite], "
         f"test_rmse={best_result['metrics']['rmse']:.6f}"
     )
 
@@ -1599,12 +1720,26 @@ def run_sweep(
         "baseline_rmse": float(best_result["baseline_rmse"]),
         "train_mean": float(best_result["train_mean"]),
         "train_std": float(best_result["train_std"]),
-        "horizon_phase_mape_pct": [
-            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_mape"]
+        "horizon_composite_loss": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_composite_loss_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_phase_composite": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
+        ],
+        "horizon_phase_composite_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
         ],
         "horizon_phase_step_ranges_1based": [
-            {"h_start": a, "h_end": b, "mape_pct": float(m) if np.isfinite(m) else None}
-            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_mape"])
+            {
+                "h_start": a,
+                "h_end": b,
+                "composite_loss": float(m) if np.isfinite(m) else None,
+                "composite_loss_pct": float(m) * 100.0 if np.isfinite(m) else None,
+            }
+            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_composite"])
         ],
     }
     with open(metrics_path, "w", encoding="utf-8") as fp:
@@ -1674,37 +1809,55 @@ def run_sweep(
         "test_mae": float(best_result["metrics"]["mae"]),
         "test_mape": float(best_result["metrics"]["mape"]),
         "test_r2": float(best_result["metrics"]["r2"]),
-        "horizon_phase_mape_pct": [
-            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_mape"]
+        "horizon_composite_loss": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_composite_loss_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_phase_composite": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
+        ],
+        "horizon_phase_composite_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
         ],
         "horizon_phase_step_ranges_1based": [
-            {"h_start": a, "h_end": b, "mape_pct": float(m) if np.isfinite(m) else None}
-            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_mape"])
+            {
+                "h_start": a,
+                "h_end": b,
+                "composite_loss": float(m) if np.isfinite(m) else None,
+                "composite_loss_pct": float(m) * 100.0 if np.isfinite(m) else None,
+            }
+            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_composite"])
         ],
     }
     with open(best_config_path, "w", encoding="utf-8") as fp:
         json.dump(best_config_payload, fp, indent=2)
 
-    horizon_path = os.path.join(args.output_dir, "best_horizon_rmse.csv")
+    horizon_composite_csv = os.path.join(args.output_dir, "best_horizon_composite.csv")
     pd.DataFrame(
         {
-            "horizon": np.arange(1, len(best_result["horizon_rmse"]) + 1),
-            "rmse": best_result["horizon_rmse"],
+            "horizon": np.arange(1, len(best_result["horizon_composite"]) + 1),
+            "composite_loss": best_result["horizon_composite"],
+            "composite_loss_pct": [float(x) * 100.0 for x in best_result["horizon_composite"]],
         }
-    ).to_csv(horizon_path, index=False)
+    ).to_csv(horizon_composite_csv, index=False)
 
-    phase_mape_csv = os.path.join(args.output_dir, "best_horizon_phase_mape.csv")
+    phase_composite_csv = os.path.join(args.output_dir, "best_horizon_phase_composite.csv")
     pd.DataFrame(
         [
             {
                 "phase": i + 1,
                 "h_start": best_result["horizon_phase_h_ranges"][i][0],
                 "h_end": best_result["horizon_phase_h_ranges"][i][1],
-                "mape_pct": best_result["horizon_phase_mape"][i],
+                "composite_loss": best_result["horizon_phase_composite"][i],
+                "composite_loss_pct": float(best_result["horizon_phase_composite"][i]) * 100.0
+                if np.isfinite(best_result["horizon_phase_composite"][i])
+                else float("nan"),
             }
             for i in range(HORIZON_PHASE_COUNT)
         ]
-    ).to_csv(phase_mape_csv, index=False)
+    ).to_csv(phase_composite_csv, index=False)
 
     sample_path = os.path.join(args.output_dir, "best_sample_forecast.csv")
     pd.DataFrame(
@@ -1889,29 +2042,47 @@ def run_sweep(
     print(f"Test R2  : {best_result['metrics']['r2']:.6f}")
     print(f"Baseline RMSE: {best_result['baseline_rmse']:.6f}")
 
-    print("\nRMSE by horizon for best run:")
-    for i, horizon_rmse in enumerate(best_result["horizon_rmse"], start=1):
-        print(f"Horizon {i:02d} RMSE: {horizon_rmse:.6f}")
+    hc_arr = np.asarray(best_result["horizon_composite"], dtype=np.float64)
+    print(
+        "\nLocal composite by horizon (centered window length min(7, PRED_LEN); normalized abs traj; "
+        "same weights as TrajectoryAwareLoss). Full series:"
+        f"\n  {horizon_composite_csv}"
+    )
+    _max_print = 48
+    if len(hc_arr) <= _max_print:
+        rng = range(1, len(hc_arr) + 1)
+    else:
+        rng = list(range(1, 9)) + [-1] + list(range(len(hc_arr) - 7, len(hc_arr) + 1))
+    for i in rng:
+        if i == -1:
+            print(f"  ... ({len(hc_arr) - 16} horizons omitted) ...")
+            continue
+        hc = hc_arr[i - 1]
+        hp = float(hc) * 100.0 if np.isfinite(hc) else float("nan")
+        print(f"Horizon {i:03d} composite: {hc:.6f}  | loss×100 = {hp:.4f}%")
 
     print(
-        "\nTest MAPE by horizon phase "
+        "\nTest composite by horizon phase "
         f"({HORIZON_PHASE_COUNT} contiguous bands over 1..PRED_LEN, pooled over test windows):"
     )
     for i in range(HORIZON_PHASE_COUNT):
         hs, he = best_result["horizon_phase_h_ranges"][i]
-        mp = best_result["horizon_phase_mape"][i]
-        if hs is None or not np.isfinite(mp):
-            print(f"  Phase {i + 1}: (empty) MAPE=n/a")
+        cv = best_result["horizon_phase_composite"][i]
+        if hs is None or not np.isfinite(cv):
+            print(f"  Phase {i + 1}: (empty) composite=n/a")
         else:
-            print(f"  Phase {i + 1} (steps {hs}-{he}): MAPE={mp:.6f}%")
+            print(
+                f"  Phase {i + 1} (steps {hs}-{he}): composite={cv:.6f}  "
+                f"| loss×100 = {float(cv) * 100.0:.4f}%"
+            )
 
     print("\nSaved artifacts:")
     print(f"- {summary_path}")
     print(f"- {history_path}")
     print(f"- {metrics_path}")
     print(f"- {best_config_path}")
-    print(f"- {horizon_path}")
-    print(f"- {phase_mape_csv}")
+    print(f"- {horizon_composite_csv}")
+    print(f"- {phase_composite_csv}")
     print(f"- {horizon_1_path}")
     print(f"- {horizon_n_path}")
     print(f"- {horizon_bias_csv_path}")

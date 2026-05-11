@@ -14,19 +14,21 @@ def parse_args():
         "--objective",
         type=str,
         default="auto",
-        help="Ranking metric. Use 'auto' to prefer best_val_loss (composite), then best_val_window_rmse.",
+        help="Ranking metric. Use 'auto' to prefer test_composite_loss, then best_val_loss, then best_val_window_rmse.",
     )
     return parser.parse_args()
 
 
 def infer_objective(summary_df: pd.DataFrame) -> str:
+    if "test_composite_loss" in summary_df.columns:
+        return "test_composite_loss"
     if "best_val_loss" in summary_df.columns:
         return "best_val_loss"
     if "best_val_window_rmse" in summary_df.columns:
         return "best_val_window_rmse"
     raise RuntimeError(
         "Could not infer ranking metric from experiment_summary.csv. "
-        "Expected best_val_loss or best_val_window_rmse."
+        "Expected test_composite_loss, best_val_loss, or best_val_window_rmse."
     )
 
 
