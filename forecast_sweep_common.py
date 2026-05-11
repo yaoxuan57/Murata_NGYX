@@ -738,46 +738,41 @@ def _plot_rolling_window_png(
     input_context_label: str = "Acceleration RMS",
     pred_smoothing_window: int = 1,
 ):
-    """Left: history of target column (z-scored), same series as train/val/test after target pre-smoothing."""
+    """Input history, horizon actual, and horizon predicted on one y-scale (raw target units)."""
 
     row0 = window_idx if input_row_start is None else int(input_row_start)
     hist = np.asarray(history_series_raw[row0 : row0 + input_len], dtype=np.float64)
     x_hist = np.arange(0, input_len, dtype=np.float64)
     x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
     w_in = max(10.0, min(22.0, 6.0 + 0.004 * float(input_len + pred_len)))
-    fig, ax_left = plt.subplots(1, 1, figsize=(w_in, 3.8))
-    ax_right = ax_left.twinx()
+    fig, ax = plt.subplots(1, 1, figsize=(w_in, 3.8))
 
-    ax_left.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
-    vstd = hist.std()
-    norm = (hist - hist.mean()) / (vstd + 1e-8)
-    ax_left.plot(
+    ax.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
+    ax.plot(
         x_hist,
-        norm,
+        hist,
         linewidth=0.95,
         alpha=0.85,
         color="0.35",
-        label=f"{input_context_label} — input (z-scored)",
+        label=f"{input_context_label} — input",
         zorder=2,
     )
 
-    ax_right.plot(x_fore, targets_row, color="C0", linewidth=1.3, label="Actual target", zorder=4)
-    ax_right.plot(x_fore, preds_row, color="C1", linewidth=1.1, label="Predicted target", zorder=4)
-    ax_left.set_title(
+    ax.plot(x_fore, targets_row, color="C0", linewidth=1.3, label="Actual target", zorder=4)
+    ax.plot(x_fore, preds_row, color="C1", linewidth=1.1, label="Predicted target", zorder=4)
+    ax.set_title(
         f"Window {window_idx} — {input_context_label} input + forecast ({pred_len}-step)\n"
         f"{_forecast_smoothing_caption(pred_smoothing_window)}",
         fontsize=10,
     )
-    ax_left.set_ylabel(f"{input_context_label} (z-scored)")
-    ax_right.set_ylabel(y_axis_label)
-    ax_left.set_xlabel(
+    ax.set_ylabel(y_axis_label)
+    ax.set_xlabel(
         f"Step index (0-{input_len - 1}: input context | {input_len}-{input_len + pred_len - 1}: horizon)"
     )
-    ax_left.grid(True, alpha=0.35)
-    h1, l1 = ax_left.get_legend_handles_labels()
-    h2, l2 = ax_right.get_legend_handles_labels()
-    max_left_legend = min(len(h1), 8)
-    ax_left.legend(h1[:max_left_legend] + h2, l1[:max_left_legend] + l2, loc="upper left", fontsize=7)
+    ax.grid(True, alpha=0.35)
+    h, leg_labels = ax.get_legend_handles_labels()
+    max_entries = min(len(h), 8)
+    ax.legend(h[:max_entries], leg_labels[:max_entries], loc="upper left", fontsize=7)
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
