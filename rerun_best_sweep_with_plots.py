@@ -53,6 +53,42 @@ def parse_args():
         help="If set, passed to train_arima_sweep (pre-split target smoothing). "
         "When omitted, uses best_config.target_smoothing_window when present.",
     )
+    parser.add_argument(
+        "--value-column",
+        type=str,
+        default=None,
+        help="Override best_config value_column when re-running (must match sweep training).",
+    )
+    parser.add_argument(
+        "--feature-columns",
+        nargs="+",
+        default=None,
+        metavar="COL",
+        help="Override best_config input features (one or more column names).",
+    )
+    parser.add_argument(
+        "--use-all-numeric-features",
+        action="store_true",
+        help="Pass --use-all-numeric-features to the train script (overrides saved feature list).",
+    )
+    parser.add_argument(
+        "--uniform-step-seconds",
+        type=float,
+        default=None,
+        help="Override best_config uniform_step_seconds for the train script.",
+    )
+    parser.add_argument(
+        "--uniform-step-tolerance-seconds",
+        type=float,
+        default=None,
+        help="Override best_config uniform_step_tolerance_seconds for the train script.",
+    )
+    parser.add_argument(
+        "--loss-tail-weight",
+        type=float,
+        default=None,
+        help="Override best_config loss_tail_weight when passing loss weights to the train script.",
+    )
     return parser.parse_args()
 
 
@@ -170,6 +206,11 @@ def main():
             cmd.extend(["--test-csv", str(best_config["test_csv"])])
     if supports_loss_weights:
         loss_lap = best_config.get("loss_laplacian_weight", args.loss_laplacian_weight)
+        tail_w = (
+            args.loss_tail_weight
+            if args.loss_tail_weight is not None
+            else best_config.get("loss_tail_weight", 1.0)
+        )
         pred_smooth = args.pred_smoothing_window
         cmd.extend(
             [
@@ -183,6 +224,8 @@ def main():
                 str(args.loss_variance_weight),
                 "--loss-laplacian-weight",
                 str(loss_lap),
+                "--loss-tail-weight",
+                str(tail_w),
                 "--pred-smoothing-window",
                 str(pred_smooth),
             ]
@@ -196,8 +239,16 @@ def main():
     if rolling_limit is not None:
         cmd.extend(["--rolling-window-artifact-limit", str(rolling_limit)])
 
-    us = best_config.get("uniform_step_seconds")
-    ut = best_config.get("uniform_step_tolerance_seconds")
+    us = (
+        args.uniform_step_seconds
+        if args.uniform_step_seconds is not None
+        else best_config.get("uniform_step_seconds")
+    )
+    ut = (
+        args.uniform_step_tolerance_seconds
+        if args.uniform_step_tolerance_seconds is not None
+        else best_config.get("uniform_step_tolerance_seconds")
+    )
     if us is not None:
         cmd.extend(["--uniform-step-seconds", str(us)])
     if ut is not None:
@@ -209,15 +260,22 @@ def main():
 
     append_optional(cmd, "--lr", lr)
     append_optional(cmd, "--weight-decay", weight_decay)
-    value_column = best_config.get("value_column")
+    value_column = args.value_column if args.value_column is not None else best_config.get("value_column")
     if value_column is not None:
         cmd.extend(["--value-column", str(value_column)])
-    feature_columns = best_config.get("feature_columns")
-    if isinstance(feature_columns, list) and len(feature_columns) > 0:
-        cmd.append("--feature-columns")
-        cmd.extend([str(c) for c in feature_columns])
-    if bool(best_config.get("use_all_numeric_features", False)):
+    if args.use_all_numeric_features:
         cmd.append("--use-all-numeric-features")
+    elif args.feature_columns is not None:
+        cmd.append("--feature-columns")
+        cmd.extend([str(c) for c in args.feature_columns])
+    else:
+        if bool(best_config.get("use_all_numeric_features", False)):
+            cmd.append("--use-all-numeric-features")
+        else:
+            feature_columns = best_config.get("feature_columns")
+            if isinstance(feature_columns, list) and len(feature_columns) > 0:
+                cmd.append("--feature-columns")
+                cmd.extend([str(c) for c in feature_columns])
     target_smooth = args.target_smoothing_window
     if target_smooth is None:
         target_smooth = best_config.get("target_smoothing_window")

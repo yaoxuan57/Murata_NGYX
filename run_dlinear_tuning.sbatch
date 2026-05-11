@@ -45,7 +45,7 @@ fi
 #        sbatch --export=ALL,INPUT_FEATURES="Acceleration RMS;Kurtosis;Battery Voltage" run_dlinear_tuning.sbatch
 #   2) USE_ALL_NUMERIC_FEATURES=1 (default) uses every numeric column except TIMESTAMP / smoothed target.
 #        Set USE_ALL_NUMERIC_FEATURES=0 (and leave INPUT_FEATURES empty) to fall back to TARGET_COLUMN only.
-INPUT_FEATURES=${INPUT_FEATURES:-Acceleration RMS;Kurtosis}
+INPUT_FEATURES=${INPUT_FEATURES:-Acceleration RMS}
 USE_ALL_NUMERIC_FEATURES=${USE_ALL_NUMERIC_FEATURES:-0}
 if [ -n "${INPUT_FEATURES}" ]; then
   IFS=';' read -r -a INPUT_FEATURE_ARR <<< "${INPUT_FEATURES}"
