@@ -97,11 +97,33 @@ def append_optional(cmd, flag, value):
         cmd.extend([flag, str(value)])
 
 
-def model_config_to_flags(model_config):
+def model_config_to_flags(model_config, train_script: str):
+    """Map saved model_config to CLI flags; omit keys the target train script does not define."""
     args = []
     # input_dim is resolved from --feature-columns / CSV at train time, not a train_*_sweep CLI flag.
     skip = {"model_type", "input_len", "pred_len", "input_dim"}
-    for key, value in model_config.items():
+    mtype = (model_config or {}).get("model_type")
+    script = os.path.basename(train_script).lower()
+    is_transformer = mtype == "transformer" or (mtype is None and "transformer" in script)
+    # Transformer sweep only exposes d-model / nhead / layers / dim-feedforward (+ common dropout).
+    _dlinear_family = {
+        "kernel_size",
+        "use_residual_head",
+        "residual_hidden",
+        "residual_dropout",
+        "residual_weight",
+        "num_experts",
+        "moe_gate_hidden",
+        "moe_gate_dropout",
+        "moe_gate_temperature",
+    }
+    _transformer_only = {"d_model", "nhead", "num_layers", "dim_feedforward"}
+    if is_transformer:
+        skip |= _dlinear_family
+    else:
+        skip |= _transformer_only
+
+    for key, value in (model_config or {}).items():
         if key in skip:
             continue
         flag = f"--{key.replace('_', '-')}"
@@ -282,7 +304,7 @@ def main():
         target_smooth = best_config.get("target_smoothing_window")
     if target_smooth is not None:
         cmd.extend(["--target-smoothing-window", str(int(target_smooth))])
-    cmd.extend(model_config_to_flags(model_config))
+    cmd.extend(model_config_to_flags(model_config, args.train_script))
     cmd.extend(["--output-dir", out_dir])
 
     print("Re-running best config with window plots:")
