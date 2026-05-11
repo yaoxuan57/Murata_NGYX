@@ -19,20 +19,33 @@ mkdir -p ~/logs
 UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-300}
 UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-30}
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
-COMMON_TRAIN="--epochs 250 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
+COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
 # Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
 TARGET_COLUMN=${TARGET_COLUMN:-"Acceleration RMS"}
+# Per-window rolling CSV/PNG under rolling_window_forecasts/ (full series still in all_windows_forecasts.csv).
 ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
 COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}"
+
+# Pre-split smoothing on --value-column (same as run_dlinear_tuning.sbatch / run_arima_tuning.sbatch): centered MA per CSV before windows.
+# Rolling-window PNGs plot that same smoothed value history and smoothed horizons (actual); predictions are raw model outputs unless --pred-smoothing-window>1 is set in train args.
+# Example: sbatch --export=ALL,TARGET_SMOOTHING_WINDOW=7 run_transformer_tuning.sbatch
+TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW:-200}
+TARGET_SMOOTH_FLAGS=()
+if [ "${TARGET_SMOOTHING_WINDOW}" -gt 1 ] 2>/dev/null; then
+  TARGET_SMOOTH_FLAGS=(--target-smoothing-window "${TARGET_SMOOTHING_WINDOW}")
+  echo "Pre-split target smoothing: window=${TARGET_SMOOTHING_WINDOW} (centered MA on value column per CSV)."
+else
+  echo "Pre-split target smoothing: off (TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW})."
+fi
 
 # Input feature selection. Two ways to override at submit time:
 #   1) INPUT_FEATURES — semicolon-separated column names (so column names with spaces work).
 #        sbatch --export=ALL,INPUT_FEATURES="Acceleration RMS;Kurtosis;Battery Voltage" run_transformer_tuning.sbatch
-#   2) USE_ALL_NUMERIC_FEATURES=1 (default) uses every numeric column except TIMESTAMP / smoothed target.
+#   2) USE_ALL_NUMERIC_FEATURES=1 uses every numeric column except TIMESTAMP / smoothed target.
 #        Set USE_ALL_NUMERIC_FEATURES=0 (and leave INPUT_FEATURES empty) to fall back to TARGET_COLUMN only.
-INPUT_FEATURES=${INPUT_FEATURES:-}
+INPUT_FEATURES=${INPUT_FEATURES:-Acceleration RMS}
 USE_ALL_NUMERIC_FEATURES=${USE_ALL_NUMERIC_FEATURES:-0}
 if [ -n "${INPUT_FEATURES}" ]; then
   IFS=';' read -r -a INPUT_FEATURE_ARR <<< "${INPUT_FEATURES}"
@@ -40,12 +53,16 @@ if [ -n "${INPUT_FEATURES}" ]; then
   echo "Input features (explicit): ${INPUT_FEATURE_ARR[@]}"
 elif [ "${USE_ALL_NUMERIC_FEATURES}" = "1" ]; then
   FEATURE_FLAGS=(--use-all-numeric-features)
-  echo "Input features: all numeric columns (default)."
+  echo "Input features: all numeric columns."
 else
   FEATURE_FLAGS=()
   echo "Input features: target column only (${TARGET_COLUMN})."
 fi
 
+# Dataset selection (override at submit time).
+# Option A — ONE CSV + window ratios: SINGLE_CSV (+ TRAIN_RATIO, VAL_RATIO, optional TEST_RATIO).
+# Option B — train+val CSV + test CSV: TRAIN_VAL_CSV + TEST_CSV.
+# Option C — three files: TRAIN_CSV + VAL_CSV + TEST_CSV.
 TRAIN_VAL_CSV=${TRAIN_VAL_CSV:-}
 TEST_CSV=${TEST_CSV:-}
 TRAIN_CSV=${TRAIN_CSV:-}
@@ -79,22 +96,36 @@ else
   DATA_FOLDER_SUFFIX="_${DATA_FOLDER_NAME}"
 fi
 
+# Under sbatch, SLURM_JOB_ID is the scheduler job id — append so outputs never collide across submissions.
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+  JOB_SUFFIX="_job${SLURM_JOB_ID}"
+else
+  JOB_SUFFIX=""
+fi
+
 MODEL_SLUG="transformer"
 TRAIN_SCRIPT="train_transformer_sweep.py"
+RUN_TAG="${MODEL_SLUG}"
 
-ROOT="outputs_${MODEL_SLUG}_tuning${DATA_FOLDER_SUFFIX}_${DATA_TAG}"
+# outputs_transformer_tuning_<data_folder>_<data_tag>[_job<id>] — job suffix matches run_dlinear_tuning.sbatch
+ROOT="outputs_${MODEL_SLUG}_tuning${DATA_FOLDER_SUFFIX}_${DATA_TAG}${JOB_SUFFIX}"
 RUNS="${ROOT}/runs"
 BEST="${ROOT}/best_model"
 mkdir -p "${RUNS}" "${BEST}"
 
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --d-model 128 --nhead 8 --num-layers 4 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_d128_h8_l4_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --d-model 128 --nhead 8 --num-layers 5 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_d128_h8_l5_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --d-model 160 --nhead 8 --num-layers 5 --dim-feedforward 320 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_d160_h8_l5_lr2e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_d192_h8_l6_lr2e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_d192_h8_l6_lr2e4"
+echo "Output directory root: ${ROOT}"
 
+# 1) Run candidate configs and save window plots for each candidate.
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 864 --d-model 128 --nhead 8 --num-layers 4 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_864_d128_h8_l4_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1296 --d-model 128 --nhead 8 --num-layers 5 --dim-feedforward 256 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_1296_d128_h8_l5_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 1728 --d-model 160 --nhead 8 --num-layers 5 --dim-feedforward 320 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_1728_d160_h8_l5_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2160 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2160_d192_h8_l6_lr2e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 2592 --d-model 192 --nhead 8 --num-layers 6 --dim-feedforward 384 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_2592_d192_h8_l6_lr2e4"
+
+# 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
 
+# 3) Re-run only the selected best candidate with window plots enabled.
 if [ -n "${SINGLE_CSV}" ]; then
   RERUN_DATA=(--single-csv "${SINGLE_CSV}" --train-ratio "${TRAIN_RATIO}" --val-ratio "${VAL_RATIO}")
   if [ -n "${TEST_RATIO:-}" ]; then
@@ -114,11 +145,12 @@ python -u rerun_best_sweep_with_plots.py \
   "${FEATURE_FLAGS[@]}" \
   ${COMMON_ROLLING} \
   ${COMMON_TRAIN} \
-  ${COMMON_LOSS}
+  ${COMMON_LOSS} \
+  --target-smoothing-window "${TARGET_SMOOTHING_WINDOW}"
 
 python -u select_best_sweep_run.py --runs-root "${BEST}" --out-json "best_model_selection.json"
 
-echo "Transformer tuning completed."
+echo "Transformer tuning completed. Mode=${RUN_TAG}"
 echo "Candidates ranking: ${RUNS}/sweep_run_ranking.csv"
 echo "Selected best candidate metadata: ${RUNS}/best_run_selection.json"
 echo "Candidate run plots under: ${RUNS}/<cfg>/rolling_window_forecasts/plots"
