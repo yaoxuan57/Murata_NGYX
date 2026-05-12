@@ -427,8 +427,21 @@ def horizon_phase_ranges_csv_string(ranges: list) -> str:
 
 
 def parse_timestamp_series(series: pd.Series, name: str) -> pd.Series:
+    """Parse TIMESTAMP the same way as ``plot_data_acceleration_rms_interactive_clean.ipynb`` (Excel-aligned).
+
+    Primary path: ``dayfirst=True, format="mixed"``. Remaining NaT rows fall back to strict
+    ISO and other formats so training scripts keep working on edge-case strings.
+    """
     raw = series.astype(str).str.strip()
-    parsed = pd.to_datetime(raw, format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    parsed = pd.to_datetime(raw, dayfirst=True, format="mixed", errors="coerce")
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            format="%Y-%m-%d %H:%M:%S",
+            errors="coerce",
+        )
 
     mask = parsed.isna()
     if mask.any():
