@@ -169,11 +169,8 @@ mkdir -p "${RUNS}" "${BEST}"
 echo "Output directory root: ${ROOT}"
 
 # 1) Run candidate configs and save window plots for each candidate.
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 288 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 432 --kernel-size 11 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_432_k11_lr5e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 576 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_576_k11_lr2e4"
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 720 --kernel-size 11 --lr 2e-4 --weight-decay 1e-6 --output-dir "${RUNS}/cfg_720_k11_lr2e4"
-  
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
+ 
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
 
