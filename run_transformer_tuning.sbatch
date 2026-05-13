@@ -15,11 +15,21 @@ set -euo pipefail
 
 mkdir -p ~/logs
 
-# Uniform-step window filter (5-min cadence by default; override via env, e.g. UNIFORM_STEP_SECONDS=1800).
-UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-3600}
+# --- Timestamp / window rules (see forecast_sweep_common.compute_timestep_window_start_indices) ---
+# Max gap: every consecutive row-to-row Δt inside a window must be ≤ this (seconds). Any shorter cadence is OK.
+MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS:-3600}
+# Nominal cadence (optional): set REQUIRE_UNIFORM_TIMESTEP=1 to also require each step ≈ UNIFORM_STEP_SECONDS ± UNIFORM_TOL_SECONDS.
+# Default 0 = do NOT use nominal spacing; only the max-gap rule above filters windows.
+REQUIRE_UNIFORM_TIMESTEP=${REQUIRE_UNIFORM_TIMESTEP:-0}
+UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-300}
 UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-30}
+if [ "${REQUIRE_UNIFORM_TIMESTEP}" = "1" ]; then
+  _UNIFORM_FLAGS="--require-uniform-timestep --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
+else
+  _UNIFORM_FLAGS="--no-require-uniform-timestep"
+fi
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
-COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS} --train-window-stride 1 --val-window-stride 1 --test-window-stride 1"
+COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 ${_UNIFORM_FLAGS} --max-consecutive-timestamp-gap-seconds ${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
 # Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
@@ -79,7 +89,7 @@ fi
 #   2) Or split offline: python split_csv_chronological_train_val_test.py -i data/your.csv -o data/splits/my_run
 #      then: sbatch --export=ALL,SPLIT_OUT_DIR=data/splits/my_run,SINGLE_CSV= run_transformer_tuning.sbatch
 #      (SINGLE_CSV must be empty when using SPLIT_OUT_DIR or three explicit CSV paths.)
-SPLIT_SOURCE_CSV=${SPLIT_SOURCE_CSV:-}
+SPLIT_SOURCE_CSV=${SPLIT_SOURCE_CSV:--data/AHU_2_9_Blower_DE_A.csv}
 SPLIT_OUT_DIR=${SPLIT_OUT_DIR:-}
 CHRONO_TRAIN_RATIO=${CHRONO_TRAIN_RATIO:-0.6}
 CHRONO_VAL_RATIO=${CHRONO_VAL_RATIO:-0.2}

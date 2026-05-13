@@ -192,6 +192,14 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         help="Half-width tolerance on each step vs nominal (seconds). Rows outside nominal±tol break a contiguous run.",
     )
     parser.add_argument(
+        "--max-consecutive-timestamp-gap-seconds",
+        type=float,
+        default=None,
+        metavar="S",
+        help="If set, exclude any window that contains a consecutive TIMESTAMP gap larger than S seconds "
+        "(no windows crossing long outages). Combines with uniform-step filtering when that is enabled.",
+    )
+    parser.add_argument(
         "--train-window-stride",
         type=int,
         default=1,
@@ -532,35 +540,87 @@ def summarize_timestamp_steps(
     )
 
 
-def compute_uniform_timestep_start_indices(
+def compute_timestep_window_start_indices(
     timestamps: pd.Series,
     span_len: int,
-    nominal_seconds: float = 5.0,
+    *,
+    nominal_seconds: Optional[float] = None,
     tolerance_seconds: float = 1.01,
+    max_consecutive_gap_seconds: Optional[float] = None,
 ) -> np.ndarray:
-    """
-    Indices i such that timestamps.iloc[i : i + span_len] advances by nominal_seconds (+/- tol)
-    at every consecutive pair. Gaps or irregular steps break contiguous runs — windows never
-    glue two runs together.
+    """Row indices ``i`` where the window ``[i, i + span_len)`` is allowed by timestamp rules.
+
+    - If ``nominal_seconds`` is set, each consecutive step must lie in
+      ``nominal_seconds ± tolerance_seconds`` (same as the legacy uniform filter).
+    - If ``max_consecutive_gap_seconds`` is set, each consecutive step must be **≤** that many
+      seconds (rejects windows that span a longer gap).
+    - If both are set, both must hold. If neither is set, every dense start index is returned.
     """
     ts = pd.Series(timestamps).reset_index(drop=True)
     if span_len <= 0:
         raise ValueError("span_len must be positive.")
-    if len(ts) < span_len:
+    n = len(ts)
+    if n < span_len:
         return np.array([], dtype=np.int64)
-    values = ts.to_numpy(dtype="datetime64[ns]")
     if span_len == 1:
-        return np.arange(len(ts), dtype=np.int64)
+        return np.arange(n, dtype=np.int64)
 
+    if nominal_seconds is None and max_consecutive_gap_seconds is None:
+        return np.arange(n - span_len + 1, dtype=np.int64)
+
+    values = ts.to_numpy(dtype="datetime64[ns]")
     diffs_ns = np.diff(values.astype("int64"))
-    nominal_ns = int(round(float(nominal_seconds) * 1e9))
-    tol_ns = int(round(float(tolerance_seconds) * 1e9))
-    step_ok = np.abs(diffs_ns - nominal_ns) <= tol_ns
+
+    if nominal_seconds is None:
+        uniform_ok = np.ones(diffs_ns.shape[0], dtype=bool)
+    else:
+        nominal_ns = int(round(float(nominal_seconds) * 1e9))
+        tol_ns = int(round(float(tolerance_seconds) * 1e9))
+        uniform_ok = np.abs(diffs_ns - nominal_ns) <= tol_ns
+
+    if max_consecutive_gap_seconds is None:
+        gap_ok = np.ones(diffs_ns.shape[0], dtype=bool)
+    else:
+        max_ns = int(round(float(max_consecutive_gap_seconds) * 1e9))
+        gap_ok = diffs_ns <= max_ns
+
+    step_ok = uniform_ok & gap_ok
     m = span_len - 1
     if step_ok.size < m:
         return np.array([], dtype=np.int64)
     conv = np.convolve(step_ok.astype(np.int32), np.ones(m, dtype=np.int32), mode="valid")
     return np.where(conv == m)[0].astype(np.int64)
+
+
+def window_start_index_kwargs_from_args(args, span_len: int) -> dict:
+    """Keyword bundle for :func:`compute_timestep_window_start_indices` from sweep CLI args."""
+    mg = getattr(args, "max_consecutive_timestamp_gap_seconds", None)
+    return {
+        "span_len": span_len,
+        "nominal_seconds": float(args.uniform_step_seconds) if args.require_uniform_timestep else None,
+        "tolerance_seconds": float(args.uniform_step_tolerance_seconds),
+        "max_consecutive_gap_seconds": float(mg) if mg is not None else None,
+    }
+
+
+def compute_uniform_timestep_start_indices(
+    timestamps: pd.Series,
+    span_len: int,
+    nominal_seconds: float = 5.0,
+    tolerance_seconds: float = 1.01,
+    max_consecutive_gap_seconds: Optional[float] = None,
+) -> np.ndarray:
+    """Indices ``i`` where every step in the window matches nominal ± tol (optional max gap cap).
+
+    Prefer :func:`compute_timestep_window_start_indices` when ``nominal_seconds`` may be disabled.
+    """
+    return compute_timestep_window_start_indices(
+        timestamps,
+        span_len,
+        nominal_seconds=nominal_seconds,
+        tolerance_seconds=tolerance_seconds,
+        max_consecutive_gap_seconds=max_consecutive_gap_seconds,
+    )
 
 
 def row_indices_covered_by_windows(starts: np.ndarray, span: int, n_rows: int) -> np.ndarray:
@@ -1357,6 +1417,11 @@ def run_sweep(
                 df_test["TIMESTAMP"], "test",
                 args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
             )
+    if args.max_consecutive_timestamp_gap_seconds is not None:
+        print(
+            f"Max TIMESTAMP gap inside any model window: each consecutive step must be "
+            f"≤ {args.max_consecutive_timestamp_gap_seconds:g} s (windows crossing larger gaps are dropped)."
+        )
 
     if single_file_mode:
         train_mean = float("nan")
@@ -1395,32 +1460,30 @@ def run_sweep(
         for pred_len in args.pred_lens:
             try:
                 span = input_len + pred_len
-                uniform_kw = dict(
-                    span_len=span,
-                    nominal_seconds=args.uniform_step_seconds,
-                    tolerance_seconds=args.uniform_step_tolerance_seconds,
-                )
+                wk = window_start_index_kwargs_from_args(args, span)
                 if single_file_mode:
                     T = int(len(full_series))
-                    if args.require_uniform_timestep:
-                        all_valid = compute_uniform_timestep_start_indices(df_all["TIMESTAMP"], **uniform_kw)
-                        n_slide = max(0, T - span + 1)
+                    n_slide = max(0, T - span + 1)
+                    if args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
+                        all_valid = compute_timestep_window_start_indices(df_all["TIMESTAMP"], **wk)
+                        _parts = []
+                        if args.require_uniform_timestep:
+                            _parts.append("uniform step")
+                        if args.max_consecutive_timestamp_gap_seconds is not None:
+                            _parts.append("max gap")
+                        _lbl = "+".join(_parts) if _parts else "filtered"
                         print(
-                            f"  Single CSV uniform windows: {len(all_valid)}/{n_slide} valid starts "
+                            f"  Single CSV {_lbl} windows: {len(all_valid)}/{n_slide} valid starts "
                             f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
                         )
                         if len(all_valid) == 0 and n_slide > 0:
                             print(
-                                "  [hint] 0 valid uniform-step windows. The data sampling rate likely "
-                                "does not match --uniform-step-seconds. Inspect the [step-stats:single] "
-                                "line above (median/mode = the most common gap in seconds) and either "
-                                "pass --uniform-step-seconds <observed_step> "
-                                "(e.g. --uniform-step-seconds 1800 for 30-min cadence), widen "
-                                "--uniform-step-tolerance-seconds, or pass "
-                                "--no-require-uniform-timestep to disable the filter."
+                                "  [hint] 0 valid windows after timestamp filters. Check --uniform-step-seconds "
+                                "vs [step-stats:single], --uniform-step-tolerance-seconds, "
+                                "--max-consecutive-timestamp-gap-seconds, or disable filters "
+                                "(--no-require-uniform-timestep and omit max gap)."
                             )
                     else:
-                        n_slide = max(0, T - span + 1)
                         all_valid = np.arange(n_slide, dtype=np.int64) if n_slide > 0 else np.zeros(0, dtype=np.int64)
                         print(
                             f"  Single CSV dense sliding: {len(all_valid)} starts "
@@ -1487,16 +1550,16 @@ def run_sweep(
                         sample_starts=test_starts_arr,
                     )
                     tv_starts = None
-                elif args.require_uniform_timestep:
+                elif args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
                     if explicit_tv:
-                        train_starts = compute_uniform_timestep_start_indices(df_train["TIMESTAMP"], **uniform_kw)
-                        val_starts = compute_uniform_timestep_start_indices(df_val["TIMESTAMP"], **uniform_kw)
-                        test_starts = compute_uniform_timestep_start_indices(df_test["TIMESTAMP"], **uniform_kw)
+                        train_starts = compute_timestep_window_start_indices(df_train["TIMESTAMP"], **wk)
+                        val_starts = compute_timestep_window_start_indices(df_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
                         n_tr_s = max(0, len(train_target_norm) - span + 1)
                         n_va_s = max(0, len(val_target_norm) - span + 1)
                         n_te_s = max(0, len(test_target_norm) - span + 1)
                         print(
-                            f"  Uniform windows: train {len(train_starts)}/{n_tr_s} | "
+                            f"  Timestamp-filtered windows: train {len(train_starts)}/{n_tr_s} | "
                             f"val {len(val_starts)}/{n_va_s} | "
                             f"test {len(test_starts)}/{n_te_s} "
                             f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
@@ -1521,8 +1584,8 @@ def run_sweep(
                                 f"test every {te_stride} ({_te0}→{len(test_starts)})"
                             )
                     else:
-                        tv_starts = compute_uniform_timestep_start_indices(df_train_val["TIMESTAMP"], **uniform_kw)
-                        test_starts = compute_uniform_timestep_start_indices(df_test["TIMESTAMP"], **uniform_kw)
+                        tv_starts = compute_timestep_window_start_indices(df_train_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
                         te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
                         _te0 = len(test_starts)
                         test_starts = subsample_window_starts(
@@ -1537,7 +1600,7 @@ def run_sweep(
                         n_tv_sliding = max(0, len(tv_target_norm) - span + 1)
                         n_test_sliding = max(0, len(test_target_norm) - span + 1)
                         print(
-                            f"  Uniform windows kept: train_val {len(tv_starts)}/{n_tv_sliding} | "
+                            f"  Timestamp-filtered windows kept: train_val {len(tv_starts)}/{n_tv_sliding} | "
                             f"test {len(test_starts)}/{n_test_sliding} "
                             f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
                         )
@@ -1585,6 +1648,13 @@ def run_sweep(
                         val_dataset = Subset(tv_dataset, range(n_train, n_tv))
                 else:
                     tv_starts = train_starts = val_starts = test_starts = None
+                    if explicit_tv and args.max_consecutive_timestamp_gap_seconds is not None:
+                        train_starts = compute_timestep_window_start_indices(df_train["TIMESTAMP"], **wk)
+                        val_starts = compute_timestep_window_start_indices(df_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                    elif not explicit_tv and args.max_consecutive_timestamp_gap_seconds is not None:
+                        tv_starts = compute_timestep_window_start_indices(df_train_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
                     if explicit_tv:
                         train_dataset = MultiStepDeltaDataset(
                             train_feat_norm,
@@ -1933,6 +2003,11 @@ def run_sweep(
         "require_uniform_timestep": bool(args.require_uniform_timestep),
         "uniform_step_seconds": float(args.uniform_step_seconds),
         "uniform_step_tolerance_seconds": float(args.uniform_step_tolerance_seconds),
+        "max_consecutive_timestamp_gap_seconds": (
+            float(args.max_consecutive_timestamp_gap_seconds)
+            if args.max_consecutive_timestamp_gap_seconds is not None
+            else None
+        ),
         "best_input_len": int(best_input_len),
         "best_pred_len": int(best_pred_len),
         "model_config": model_config_factory(args, best_input_len, best_pred_len),

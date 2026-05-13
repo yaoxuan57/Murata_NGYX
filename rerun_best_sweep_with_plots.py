@@ -84,6 +84,12 @@ def parse_args():
         help="Override best_config uniform_step_tolerance_seconds for the train script.",
     )
     parser.add_argument(
+        "--max-consecutive-timestamp-gap-seconds",
+        type=float,
+        default=None,
+        help="Override best_config max_consecutive_timestamp_gap_seconds for the train script.",
+    )
+    parser.add_argument(
         "--loss-tail-weight",
         type=float,
         default=None,
@@ -276,6 +282,12 @@ def main():
         cmd.extend(["--uniform-step-seconds", str(us)])
     if ut is not None:
         cmd.extend(["--uniform-step-tolerance-seconds", str(ut)])
+    mgap = (
+        args.max_consecutive_timestamp_gap_seconds
+        if args.max_consecutive_timestamp_gap_seconds is not None
+        else best_config.get("max_consecutive_timestamp_gap_seconds")
+    )
+    append_optional(cmd, "--max-consecutive-timestamp-gap-seconds", mgap)
     if bool(best_config.get("require_uniform_timestep", True)):
         cmd.append("--require-uniform-timestep")
     else:
