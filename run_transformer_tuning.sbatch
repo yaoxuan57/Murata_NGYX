@@ -77,7 +77,23 @@ CHRONO_TRAIN_RATIO=${CHRONO_TRAIN_RATIO:-0.6}
 CHRONO_VAL_RATIO=${CHRONO_VAL_RATIO:-0.2}
 CHRONO_TEST_RATIO=${CHRONO_TEST_RATIO:-0.2}
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Project root (must contain train_transformer_sweep.py, split_csv_chronological_train_val_test.py, etc.).
+# On Slurm the *copy* of this script often lives under .../spool/jobNNNN/ — dirname(BASH_SOURCE) is NOT your repo.
+# Fix: (1) submit from the repo:  cd /path/to/Murata_NGYX && sbatch run_transformer_tuning.sbatch  → SLURM_SUBMIT_DIR works
+#      (2) or set in this file or via  sbatch --export=ALL,REPO_ROOT=/path/to/Murata_NGYX
+REPO_ROOT=${REPO_ROOT:-}
+if [ -n "${REPO_ROOT}" ]; then
+  SCRIPT_DIR="${REPO_ROOT}"
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+else
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+cd "${SCRIPT_DIR}" || {
+  echo "ERROR: cannot cd to SCRIPT_DIR=${SCRIPT_DIR} (set REPO_ROOT to your Murata_NGYX clone)." >&2
+  exit 1
+}
+echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
 
 TRAIN_CSV=${TRAIN_CSV:-}
 VAL_CSV=${VAL_CSV:-}
