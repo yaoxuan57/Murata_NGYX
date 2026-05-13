@@ -907,17 +907,34 @@ def _plot_rolling_window_png(
     input_row_start: Optional[int] = None,
     input_context_label: str = "Acceleration RMS",
     pred_smoothing_window: int = 1,
+    hist_timestamps: Optional[pd.Series] = None,
+    fore_timestamps: Optional[pd.Series] = None,
 ):
     """Input history, horizon actual, and horizon predicted on one y-scale (raw target units)."""
 
     row0 = window_idx if input_row_start is None else int(input_row_start)
     hist = np.asarray(history_series_raw[row0 : row0 + input_len], dtype=np.float64)
-    x_hist = np.arange(0, input_len, dtype=np.float64)
-    x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
+    use_ts = (
+        hist_timestamps is not None
+        and fore_timestamps is not None
+        and len(hist_timestamps) == input_len
+        and len(fore_timestamps) == pred_len
+    )
+    if use_ts:
+        x_hist = pd.to_datetime(hist_timestamps, errors="coerce").reset_index(drop=True)
+        x_fore = pd.to_datetime(fore_timestamps, errors="coerce").reset_index(drop=True)
+        t_last_in = pd.Timestamp(x_hist.iloc[-1])
+        t_first_out = pd.Timestamp(x_fore.iloc[0])
+        boundary_x = t_last_in + (t_first_out - t_last_in) / 2
+    else:
+        x_hist = np.arange(0, input_len, dtype=np.float64)
+        x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
+        boundary_x = float(input_len - 0.5)
+
     w_in = max(10.0, min(22.0, 6.0 + 0.004 * float(input_len + pred_len)))
     fig, ax = plt.subplots(1, 1, figsize=(w_in, 3.8))
 
-    ax.axvline(x=input_len - 0.5, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
+    ax.axvline(x=boundary_x, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
     ax.plot(
         x_hist,
         hist,
@@ -936,9 +953,13 @@ def _plot_rolling_window_png(
         fontsize=10,
     )
     ax.set_ylabel(y_axis_label)
-    ax.set_xlabel(
-        f"Step index (0-{input_len - 1}: input context | {input_len}-{input_len + pred_len - 1}: horizon)"
-    )
+    if use_ts:
+        ax.set_xlabel("Timestamp (left: input context | right: forecast horizon)")
+        fig.autofmt_xdate()
+    else:
+        ax.set_xlabel(
+            f"Step index (0-{input_len - 1}: input context | {input_len}-{input_len + pred_len - 1}: horizon)"
+        )
     ax.grid(True, alpha=0.35)
     h, leg_labels = ax.get_legend_handles_labels()
     max_entries = min(len(h), 8)
@@ -1029,6 +1050,8 @@ def save_rolling_window_forecasts(
                         f"history_series_raw length {len(history_series_raw)} < required {need_len} "
                         f"for rolling plots (windows={preds_raw.shape[0]}, input_len={input_len}, pred_len={pred_len})."
                     )
+                ts_hist = timestamps.iloc[row0 : row0 + input_len].reset_index(drop=True)
+                ts_fore = timestamps.iloc[start_idx : start_idx + pred_len].reset_index(drop=True)
                 _plot_rolling_window_png(
                     window_idx=window_idx,
                     input_len=input_len,
@@ -1041,6 +1064,8 @@ def save_rolling_window_forecasts(
                     input_row_start=row0,
                     input_context_label=input_context_label,
                     pred_smoothing_window=pred_smoothing_window,
+                    hist_timestamps=ts_hist,
+                    fore_timestamps=ts_fore,
                 )
             else:
                 plt.figure(figsize=(8, 3))
@@ -1083,6 +1108,9 @@ def save_rolling_window_forecasts(
                 if history_series_raw is not None:
                     wix = int(window_df["window_index"].iloc[0])
                     rs = int(input_starts[wix])
+                    sidx = rs + input_len
+                    ts_hist = timestamps.iloc[rs : rs + input_len].reset_index(drop=True)
+                    ts_fore = timestamps.iloc[sidx : sidx + pred_len].reset_index(drop=True)
                     _plot_rolling_window_png(
                         window_idx=wix,
                         input_len=input_len,
@@ -1095,6 +1123,8 @@ def save_rolling_window_forecasts(
                         input_row_start=rs,
                         input_context_label=input_context_label,
                         pred_smoothing_window=pred_smoothing_window,
+                        hist_timestamps=ts_hist,
+                        fore_timestamps=ts_fore,
                     )
                 else:
                     plt.figure(figsize=(8, 3))

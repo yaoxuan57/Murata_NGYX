@@ -25,7 +25,7 @@ LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
 TARGET_COLUMN=${TARGET_COLUMN:-"Acceleration RMS"}
 # Per-window rolling CSV/PNG under rolling_window_forecasts/ (full series still in all_windows_forecasts.csv).
-ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-20}
+ROLLING_WINDOW_ARTIFACT_LIMIT=${ROLLING_WINDOW_ARTIFACT_LIMIT:-30}
 COMMON_ROLLING="--rolling-window-artifact-limit ${ROLLING_WINDOW_ARTIFACT_LIMIT}"
 
 # Pre-split smoothing on --value-column (same as run_dlinear_tuning.sbatch / run_arima_tuning.sbatch): centered MA per CSV before windows.
@@ -169,7 +169,7 @@ mkdir -p "${RUNS}" "${BEST}"
 echo "Output directory root: ${ROOT}"
 
 # 1) Run candidate configs and save window plots for each candidate.
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots ${COMMON_ROLLING} --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_100_k11_lr5e4"
  
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
