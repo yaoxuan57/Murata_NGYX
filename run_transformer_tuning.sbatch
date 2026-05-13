@@ -16,7 +16,7 @@ set -euo pipefail
 mkdir -p ~/logs
 
 # Uniform-step window filter (5-min cadence by default; override via env, e.g. UNIFORM_STEP_SECONDS=1800).
-UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-300}
+UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-3600}
 UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-30}
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
 COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS} --train-window-stride 1 --val-window-stride 1 --test-window-stride 1"
@@ -106,7 +106,7 @@ echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
 TRAIN_CSV=${TRAIN_CSV:-}
 VAL_CSV=${VAL_CSV:-}
 TEST_CSV=${TEST_CSV:-}
-SINGLE_CSV=${SINGLE_CSV:-data/AHU_2_9_Blower_DE_A.csv}
+SINGLE_CSV=${SINGLE_CSV:-}
 TRAIN_RATIO=${TRAIN_RATIO:-0.80}
 VAL_RATIO=${VAL_RATIO:-0.10}
 
@@ -177,7 +177,7 @@ mkdir -p "${RUNS}" "${BEST}"
 echo "Output directory root: ${ROOT}"
 
 # 1) Run candidate configs and save window plots for each candidate.
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_100_k11_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
  
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
