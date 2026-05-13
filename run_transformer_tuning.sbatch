@@ -19,7 +19,7 @@ mkdir -p ~/logs
 UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-300}
 UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-30}
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
-COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
+COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
 # Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
@@ -61,33 +61,70 @@ fi
 
 # Dataset selection (override at submit time).
 # Option A — ONE CSV + window ratios: SINGLE_CSV (+ TRAIN_RATIO, VAL_RATIO, optional TEST_RATIO).
-# Option B — train+val CSV + test CSV: TRAIN_VAL_CSV + TEST_CSV.
-# Option C — three files: TRAIN_CSV + VAL_CSV + TEST_CSV.
-TRAIN_VAL_CSV=${TRAIN_VAL_CSV:-}
-TEST_CSV=${TEST_CSV:-}
+# Option B — three files: TRAIN_CSV + VAL_CSV + TEST_CSV (explicit paths or from pre-split below).
+#
+# Option C — chronological row split saved to disk, then Option B:
+#   1) Run split before training (writes train.csv / val.csv / test.csv):
+#        sbatch --export=ALL,SPLIT_SOURCE_CSV=data/your.csv run_transformer_tuning.sbatch
+#      Optional: SPLIT_OUT_DIR=... (default: <repo>/data/splits/<stem>_r0.6_0.2_0.2/)
+#      Optional ratios: CHRONO_TRAIN_RATIO, CHRONO_VAL_RATIO, CHRONO_TEST_RATIO (default 0.6 / 0.2 / 0.2)
+#   2) Or split offline: python split_csv_chronological_train_val_test.py -i data/your.csv -o data/splits/my_run
+#      then: sbatch --export=ALL,SPLIT_OUT_DIR=data/splits/my_run,SINGLE_CSV= run_transformer_tuning.sbatch
+#      (SINGLE_CSV must be empty when using SPLIT_OUT_DIR or three explicit CSV paths.)
+SPLIT_SOURCE_CSV=${SPLIT_SOURCE_CSV:-}
+SPLIT_OUT_DIR=${SPLIT_OUT_DIR:-}
+CHRONO_TRAIN_RATIO=${CHRONO_TRAIN_RATIO:-0.6}
+CHRONO_VAL_RATIO=${CHRONO_VAL_RATIO:-0.2}
+CHRONO_TEST_RATIO=${CHRONO_TEST_RATIO:-0.2}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 TRAIN_CSV=${TRAIN_CSV:-}
 VAL_CSV=${VAL_CSV:-}
+TEST_CSV=${TEST_CSV:-}
 SINGLE_CSV=${SINGLE_CSV:-data/AHU_2_9_Blower_DE_A.csv}
 TRAIN_RATIO=${TRAIN_RATIO:-0.80}
 VAL_RATIO=${VAL_RATIO:-0.10}
 
-if [ -n "${SINGLE_CSV}" ]; then
+if [ -n "${SPLIT_SOURCE_CSV}" ]; then
+  if [ -z "${SPLIT_OUT_DIR}" ]; then
+    _split_base="$(basename "${SPLIT_SOURCE_CSV}" .csv)"
+    SPLIT_OUT_DIR="${SCRIPT_DIR}/data/splits/${_split_base}_r${CHRONO_TRAIN_RATIO}_${CHRONO_VAL_RATIO}_${CHRONO_TEST_RATIO}"
+  fi
+  mkdir -p "${SPLIT_OUT_DIR}"
+  python -u "${SCRIPT_DIR}/split_csv_chronological_train_val_test.py" \
+    --input "${SPLIT_SOURCE_CSV}" \
+    --out-dir "${SPLIT_OUT_DIR}" \
+    --train-ratio "${CHRONO_TRAIN_RATIO}" \
+    --val-ratio "${CHRONO_VAL_RATIO}" \
+    --test-ratio "${CHRONO_TEST_RATIO}"
+  TRAIN_CSV="${SPLIT_OUT_DIR}/train.csv"
+  VAL_CSV="${SPLIT_OUT_DIR}/val.csv"
+  TEST_CSV="${SPLIT_OUT_DIR}/test.csv"
+  SINGLE_CSV=""
+elif [ -n "${SPLIT_OUT_DIR}" ] && [ -f "${SPLIT_OUT_DIR}/train.csv" ] && [ -f "${SPLIT_OUT_DIR}/val.csv" ] && [ -f "${SPLIT_OUT_DIR}/test.csv" ]; then
+  TRAIN_CSV="${SPLIT_OUT_DIR}/train.csv"
+  VAL_CSV="${SPLIT_OUT_DIR}/val.csv"
+  TEST_CSV="${SPLIT_OUT_DIR}/test.csv"
+  SINGLE_CSV=""
+elif [ -n "${TRAIN_CSV}" ] && [ -n "${VAL_CSV}" ] && [ -n "${TEST_CSV}" ]; then
+  SINGLE_CSV=""
+fi
+
+if [ -n "${TRAIN_CSV}" ] && [ -n "${VAL_CSV}" ] && [ -n "${TEST_CSV}" ]; then
+  DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
+  DATA_TAG="chrono_$(basename "$(dirname "${TRAIN_CSV}")")"
+  REF_PARENT="$(dirname "${TRAIN_CSV}")"
+elif [ -n "${SINGLE_CSV}" ]; then
   DATA_FLAGS="--single-csv ${SINGLE_CSV} --train-ratio ${TRAIN_RATIO} --val-ratio ${VAL_RATIO}"
   if [ -n "${TEST_RATIO:-}" ]; then
     DATA_FLAGS="${DATA_FLAGS} --test-ratio ${TEST_RATIO}"
   fi
   DATA_TAG="$(basename "${SINGLE_CSV}" .csv)_single_r${TRAIN_RATIO}_v${VAL_RATIO}"
   REF_PARENT="$(dirname "${SINGLE_CSV}")"
-elif [ -n "${TRAIN_CSV}" ] && [ -n "${VAL_CSV}" ]; then
-  DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
-  DATA_TAG="$(basename "${TRAIN_CSV}" .csv)__$(basename "${VAL_CSV}" .csv)__to__$(basename "${TEST_CSV}" .csv)"
-  REF_PARENT="$(dirname "${TRAIN_CSV}")"
 else
-  DATA_FLAGS="--train-val-csv ${TRAIN_VAL_CSV} --test-csv ${TEST_CSV}"
-  TRAIN_VAL_BASENAME="$(basename "${TRAIN_VAL_CSV}" .csv)"
-  TEST_BASENAME="$(basename "${TEST_CSV}" .csv)"
-  DATA_TAG="${TRAIN_VAL_BASENAME}_to_${TEST_BASENAME}"
-  REF_PARENT="$(dirname "${TRAIN_VAL_CSV}")"
+  echo "ERROR: Set one of: SINGLE_CSV, or TRAIN_CSV+VAL_CSV+TEST_CSV, or SPLIT_SOURCE_CSV / SPLIT_OUT_DIR." >&2
+  exit 1
 fi
 DATA_FOLDER_NAME="$(basename "${REF_PARENT}")"
 if [ "${DATA_FOLDER_NAME}" = "." ]; then
@@ -130,10 +167,11 @@ if [ -n "${SINGLE_CSV}" ]; then
   if [ -n "${TEST_RATIO:-}" ]; then
     RERUN_DATA+=(--test-ratio "${TEST_RATIO}")
   fi
-elif [ -n "${TRAIN_CSV}" ] && [ -n "${VAL_CSV}" ]; then
+elif [ -n "${TRAIN_CSV}" ] && [ -n "${VAL_CSV}" ] && [ -n "${TEST_CSV}" ]; then
   RERUN_DATA=(--train-csv "${TRAIN_CSV}" --val-csv "${VAL_CSV}" --test-csv "${TEST_CSV}")
 else
-  RERUN_DATA=(--train-val-csv "${TRAIN_VAL_CSV}" --test-csv "${TEST_CSV}")
+  echo "ERROR: Rerun step needs single-CSV mode or explicit train/val/test CSVs." >&2
+  exit 1
 fi
 python -u rerun_best_sweep_with_plots.py \
   --selection-json "${RUNS}/best_run_selection.json" \

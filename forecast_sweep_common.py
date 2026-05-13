@@ -191,6 +191,29 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         default=1.01,
         help="Half-width tolerance on each step vs nominal (seconds). Rows outside nominal±tol break a contiguous run.",
     )
+    parser.add_argument(
+        "--train-window-stride",
+        type=int,
+        default=1,
+        metavar="S",
+        help="Keep every S-th uniform window start for training (1 = all starts). Applies after uniform filter.",
+    )
+    parser.add_argument(
+        "--val-window-stride",
+        type=int,
+        default=1,
+        metavar="S",
+        help="Stride on validation window starts after uniform filter. 1 = every start (legacy). "
+        "0 or negative = use the current pred_len (forecast length).",
+    )
+    parser.add_argument(
+        "--test-window-stride",
+        type=int,
+        default=1,
+        metavar="S",
+        help="Stride on test window starts after uniform filter. 1 = every start (legacy). "
+        "0 or negative = use the current pred_len (forecast length).",
+    )
     return parser
 
 
@@ -556,6 +579,34 @@ def row_indices_covered_by_windows(starts: np.ndarray, span: int, n_rows: int) -
             continue
         m[ss : min(ss + int(span), n_rows)] = True
     return np.flatnonzero(m)
+
+
+def _resolve_eval_window_stride(arg_stride: int, pred_len: int) -> int:
+    """0 or negative means use pred_len (non-overlapping eval steps in index space)."""
+    if arg_stride <= 0:
+        return max(1, int(pred_len))
+    return max(1, int(arg_stride))
+
+
+def subsample_window_starts(
+    starts: np.ndarray,
+    stride: int,
+    *,
+    split_name: str,
+) -> np.ndarray:
+    """Take every S-th start; stride<=1 leaves starts unchanged."""
+    s = int(stride)
+    if starts.size == 0:
+        return starts
+    if s <= 1:
+        return starts
+    out = starts[::s]
+    if out.size == 0:
+        raise ValueError(
+            f"{split_name}: window stride {s} removed all {starts.size} uniform starts; "
+            "use a shorter stride or more data."
+        )
+    return out.astype(np.int64, copy=False)
 
 
 def split_window_counts(
@@ -1361,6 +1412,17 @@ def run_sweep(
                     train_starts_arr = all_valid[:n_tr_w]
                     val_starts_arr = all_valid[n_tr_w : n_tr_w + n_va_w]
                     test_starts_arr = all_valid[n_tr_w + n_va_w :]
+                    v_stride = _resolve_eval_window_stride(args.val_window_stride, pred_len)
+                    te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                    train_starts_arr = subsample_window_starts(
+                        train_starts_arr, args.train_window_stride, split_name="single_csv train"
+                    )
+                    val_starts_arr = subsample_window_starts(
+                        val_starts_arr, v_stride, split_name="single_csv val"
+                    )
+                    test_starts_arr = subsample_window_starts(
+                        test_starts_arr, te_stride, split_name="single_csv test"
+                    )
                     print(
                         f"    Window splits: train={n_tr_w} ({n_tr_w / max(M, 1):.4f}), "
                         f"val={n_va_w}, test={n_te_w} (target ratios "
@@ -1409,9 +1471,38 @@ def run_sweep(
                             f"test {len(test_starts)}/{n_te_s} "
                             f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
                         )
+                        v_stride = _resolve_eval_window_stride(args.val_window_stride, pred_len)
+                        te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                        _tr0, _va0, _te0 = len(train_starts), len(val_starts), len(test_starts)
+                        train_starts = subsample_window_starts(
+                            train_starts, args.train_window_stride, split_name="train"
+                        )
+                        val_starts = subsample_window_starts(val_starts, v_stride, split_name="val")
+                        test_starts = subsample_window_starts(test_starts, te_stride, split_name="test")
+                        if (
+                            len(train_starts) != _tr0
+                            or len(val_starts) != _va0
+                            or len(test_starts) != _te0
+                        ):
+                            print(
+                                f"    Window strides: train every {max(1, int(args.train_window_stride))} "
+                                f"({_tr0}→{len(train_starts)}), "
+                                f"val every {v_stride} ({_va0}→{len(val_starts)}), "
+                                f"test every {te_stride} ({_te0}→{len(test_starts)})"
+                            )
                     else:
                         tv_starts = compute_uniform_timestep_start_indices(df_train_val["TIMESTAMP"], **uniform_kw)
                         test_starts = compute_uniform_timestep_start_indices(df_test["TIMESTAMP"], **uniform_kw)
+                        te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                        _te0 = len(test_starts)
+                        test_starts = subsample_window_starts(
+                            test_starts, te_stride, split_name="test (train_val+test CSV mode)"
+                        )
+                        if len(test_starts) != _te0:
+                            print(
+                                f"    Test window stride {te_stride}: {_te0}→{len(test_starts)} starts "
+                                f"(train_val windows unchanged; set --train-window-stride to thin train_val)."
+                            )
                         train_starts = val_starts = None
                         n_tv_sliding = max(0, len(tv_target_norm) - span + 1)
                         n_test_sliding = max(0, len(test_target_norm) - span + 1)
