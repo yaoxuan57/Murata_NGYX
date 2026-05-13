@@ -29,7 +29,7 @@ else
   _UNIFORM_FLAGS="--no-require-uniform-timestep"
 fi
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
-COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 20 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 ${_UNIFORM_FLAGS} --max-consecutive-timestamp-gap-seconds ${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
+COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 50 --min-delta 1e-6 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 ${_UNIFORM_FLAGS} --max-consecutive-timestamp-gap-seconds ${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
 # Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
@@ -89,7 +89,7 @@ fi
 #   2) Or split offline: python split_csv_chronological_train_val_test.py -i data/your.csv -o data/splits/my_run
 #      then: sbatch --export=ALL,SPLIT_OUT_DIR=data/splits/my_run,SINGLE_CSV= run_transformer_tuning.sbatch
 #      (SINGLE_CSV must be empty when using SPLIT_OUT_DIR or three explicit CSV paths.)
-SPLIT_SOURCE_CSV=${SPLIT_SOURCE_CSV:--data/AHU_2_9_Blower_DE_A.csv}
+SPLIT_SOURCE_CSV=${SPLIT_SOURCE_CSV:-data/AHU_2_9_Blower_DE_A.csv}
 SPLIT_OUT_DIR=${SPLIT_OUT_DIR:-}
 CHRONO_TRAIN_RATIO=${CHRONO_TRAIN_RATIO:-0.6}
 CHRONO_VAL_RATIO=${CHRONO_VAL_RATIO:-0.2}

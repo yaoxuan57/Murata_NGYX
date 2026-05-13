@@ -111,10 +111,10 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         "2) With --single-csv: val window fraction (with --train-ratio, --test-ratio). "
         "Ignored when --train-csv and --val-csv are set.",
     )
-    parser.add_argument("--early-stopping-patience", type=int, default=20)
+    parser.add_argument("--early-stopping-patience", type=int, default=50)
     parser.add_argument("--scheduler-patience", type=int, default=3)
     parser.add_argument("--scheduler-factor", type=float, default=0.5)
-    parser.add_argument("--min-delta", type=float, default=1e-4)
+    parser.add_argument("--min-delta", type=float, default=1e-6)
     parser.add_argument("--plot-sample-idx", type=int, default=200)
     parser.add_argument("--checkpoint-name", type=str, default=default_checkpoint_name)
     parser.add_argument("--loss-huber-delta", type=float, default=1.0)
