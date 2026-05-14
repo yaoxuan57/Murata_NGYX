@@ -167,6 +167,20 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         "evenly spaced from the first to last window. All windows remain in all_windows_forecasts.csv.",
     )
     parser.add_argument(
+        "--save-stitched-test-html",
+        dest="save_stitched_test_html",
+        action="store_true",
+        help="If set, write rolling_window_forecasts/stitched_test_forecast.html: interactive Plotly figure "
+        "with the first test window's actual input context, then all test horizons on real timestamps "
+        "(median, optional quantile band, actual target). Requires plotly (pip install plotly).",
+    )
+    parser.add_argument(
+        "--no-save-stitched-test-html",
+        dest="save_stitched_test_html",
+        action="store_false",
+    )
+    parser.set_defaults(save_stitched_test_html=False)
+    parser.add_argument(
         "--require-uniform-timestep",
         dest="require_uniform_timestep",
         action="store_true",
@@ -1124,6 +1138,179 @@ def _plot_rolling_window_png(
     fig.tight_layout()
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
+
+
+def save_stitched_test_forecast_html(
+    html_path: str,
+    timestamps: pd.Series,
+    window_starts: np.ndarray,
+    input_len: int,
+    pred_len: int,
+    history_series_raw: np.ndarray,
+    preds_raw: np.ndarray,
+    targets_raw: np.ndarray,
+    y_axis_label: str,
+    input_context_label: str,
+    pred_smoothing_window: int,
+    preds_quantiles_raw: Optional[np.ndarray] = None,
+    forecast_quantiles: Optional[list] = None,
+    prediction_interval_label: str = "Quantile band (low–high)",
+) -> Optional[str]:
+    """One interactive HTML: first window input (actual) + stitched test horizons on real time axis."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:
+        print(f"save_stitched_test_forecast_html: skipping ({exc}); install plotly to enable.")
+        return None
+
+    starts = np.asarray(window_starts, dtype=np.int64).reshape(-1)
+    n_windows = int(preds_raw.shape[0])
+    if n_windows <= 0 or starts.size != n_windows:
+        print("save_stitched_test_forecast_html: no test windows; skip.")
+        return None
+
+    ts_all = pd.to_datetime(timestamps, errors="coerce").reset_index(drop=True)
+    n_rows = int(len(ts_all))
+    history = np.asarray(history_series_raw, dtype=np.float64).reshape(-1)
+    if history.shape[0] < n_rows:
+        print(
+            f"save_stitched_test_forecast_html: history length {history.shape[0]} < timestamps {n_rows}; skip."
+        )
+        return None
+
+    row0 = int(starts[0])
+    if row0 < 0 or row0 + input_len > n_rows:
+        print(f"save_stitched_test_forecast_html: invalid first window start {row0}; skip.")
+        return None
+
+    x_in = ts_all.iloc[row0 : row0 + input_len]
+    y_in = history[row0 : row0 + input_len]
+
+    rows = []
+    for w in range(n_windows):
+        si = int(starts[w])
+        for h in range(pred_len):
+            ri = si + input_len + h
+            if ri < 0 or ri >= n_rows:
+                continue
+            entry = {
+                "ts": ts_all.iloc[ri],
+                "actual": float(targets_raw[w, h]),
+                "pred": float(preds_raw[w, h]),
+                "lo": float("nan"),
+                "hi": float("nan"),
+            }
+            if preds_quantiles_raw is not None and forecast_quantiles is not None:
+                pq = preds_quantiles_raw[w]
+                if pq.ndim == 2 and pq.shape[0] >= 2 and pq.shape[1] == pred_len:
+                    entry["lo"] = float(pq[0, h])
+                    entry["hi"] = float(pq[-1, h])
+            rows.append(entry)
+
+    if not rows:
+        print("save_stitched_test_forecast_html: empty forecast rows; skip.")
+        return None
+
+    fd = pd.DataFrame(rows)
+    n_before = len(fd)
+    fd = fd.groupby("ts", sort=False, as_index=False).last().sort_values("ts").reset_index(drop=True)
+    n_after = len(fd)
+    collapsed = n_before > n_after
+
+    xf = fd["ts"].tolist()
+    ya = fd["actual"].astype(float).tolist()
+    yp = fd["pred"].astype(float).tolist()
+    y_lo = fd["lo"].astype(float).tolist()
+    y_hi = fd["hi"].astype(float).tolist()
+    has_band = bool(
+        preds_quantiles_raw is not None
+        and forecast_quantiles is not None
+        and len(forecast_quantiles) >= 2
+        and np.any(np.isfinite(np.asarray(y_lo)))
+        and np.any(np.isfinite(np.asarray(y_hi)))
+    )
+
+    t_last_in = pd.Timestamp(x_in.iloc[-1])
+    t_first_out = pd.Timestamp(xf[0])
+    boundary_x = t_last_in + (t_first_out - t_last_in) / 2
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=x_in.tolist(),
+            y=y_in.tolist(),
+            mode="lines",
+            name=f"{input_context_label} — input",
+            line=dict(color="rgba(90, 90, 90, 0.95)", width=1.1),
+        )
+    )
+    if has_band:
+        fig.add_trace(
+            go.Scatter(
+                x=xf,
+                y=y_hi,
+                mode="lines",
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xf,
+                y=y_lo,
+                mode="lines",
+                line=dict(width=0),
+                fillcolor="rgba(255, 165, 0, 0.22)",
+                fill="tonexty",
+                name=prediction_interval_label,
+                hoverinfo="skip",
+            )
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=xf,
+            y=ya,
+            mode="lines",
+            name="Actual target",
+            line=dict(color="#1f77b4", width=1.35),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=xf,
+            y=yp,
+            mode="lines",
+            name="Predicted (median)",
+            line=dict(color="#ff7f0e", width=1.15),
+        )
+    )
+
+    subtitle = _forecast_smoothing_caption(pred_smoothing_window)
+    if collapsed:
+        subtitle += (
+            f"<br><span style='font-size:11px'>Overlapping test windows: "
+            f"{n_before} horizon points → {n_after} unique timestamps (last window kept per time).</span>"
+        )
+
+    fig.add_vline(x=boundary_x, line_dash="dash", line_color="rgba(120,120,120,0.95)", line_width=1.2)
+    fig.update_layout(
+        title=(
+            f"Stitched test set — {input_context_label} input + concatenated horizons ({pred_len}-step)<br>"
+            f"<sup>{subtitle}</sup>"
+        ),
+        xaxis_title="Timestamp (left: input context | right: forecast horizon)",
+        yaxis_title=y_axis_label,
+        hovermode="x unified",
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font=dict(size=10)),
+        margin=dict(t=100, l=60, r=30, b=70),
+    )
+
+    os.makedirs(os.path.dirname(os.path.abspath(html_path)), exist_ok=True)
+    fig.write_html(html_path, include_plotlyjs=True)
+    print(f"Saved stitched interactive test plot: {html_path}")
+    return html_path
 
 
 def save_rolling_window_forecasts(
@@ -2210,6 +2397,7 @@ def run_sweep(
         "pred_smoothing_window": args.pred_smoothing_window,
         "target_smoothing_window": target_smooth_stored,
         "save_window_plots": args.save_window_plots,
+        "save_stitched_test_html": bool(args.save_stitched_test_html),
         "rolling_window_artifact_limit": args.rolling_window_artifact_limit,
         "require_uniform_timestep": bool(args.require_uniform_timestep),
         "uniform_step_seconds": float(args.uniform_step_seconds),
@@ -2494,6 +2682,25 @@ def run_sweep(
         prediction_interval_label=prediction_interval_band_label(_roll_fq),
     )
 
+    stitched_html_path = None
+    if args.save_stitched_test_html:
+        stitched_html_path = save_stitched_test_forecast_html(
+            html_path=os.path.join(rolling_windows_dir, "stitched_test_forecast.html"),
+            timestamps=df_test["TIMESTAMP"],
+            window_starts=starts,
+            input_len=best_input_len,
+            pred_len=best_pred_len,
+            history_series_raw=rolling_input_hist,
+            preds_raw=best_result["all_preds_raw"],
+            targets_raw=best_result["all_targets_raw"],
+            y_axis_label=str(args.value_column),
+            input_context_label=rolling_input_label,
+            pred_smoothing_window=int(args.pred_smoothing_window),
+            preds_quantiles_raw=_roll_q,
+            forecast_quantiles=_roll_fq,
+            prediction_interval_label=prediction_interval_band_label(_roll_fq),
+        )
+
     save_plot(
         path=os.path.join(args.output_dir, f"best_horizon_{h + 1}.png"),
         title=f"Horizon-{h + 1} Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
@@ -2572,6 +2779,8 @@ def run_sweep(
     print(f"- {rolling_plots_dir}/  (per-window forecast PNGs — window_*.png)")
     print(f"- {rolling_csv_dir}/  (per-window forecast CSVs)")
     print(f"- {rolling_combined_csv_path}")
+    if stitched_html_path:
+        print(f"- {stitched_html_path}  (interactive stitched test Plotly HTML)")
     print(f"- {sample_path}")
     print(f"- {os.path.join(args.output_dir, 'best_sample_forecast.png')}")
     print(f"- {checkpoint_path}")

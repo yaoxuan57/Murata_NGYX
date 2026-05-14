@@ -95,6 +95,12 @@ def parse_args():
         default=None,
         help="Override best_config loss_tail_weight when passing loss weights to the train script.",
     )
+    parser.add_argument(
+        "--save-stitched-test-html",
+        action="store_true",
+        help="Pass --save-stitched-test-html to the train script (Plotly stitched test HTML). "
+        "Also enabled when best_config.save_stitched_test_html is true.",
+    )
     return parser.parse_args()
 
 
@@ -268,6 +274,9 @@ def main():
         )
     if supports_save_window_plots:
         cmd.append("--save-window-plots")
+
+    if args.save_stitched_test_html or bool(best_config.get("save_stitched_test_html")):
+        cmd.append("--save-stitched-test-html")
 
     rolling_limit = args.rolling_window_artifact_limit
     if rolling_limit is None:

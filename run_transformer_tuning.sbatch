@@ -56,6 +56,19 @@ else
   echo "Rolling-window artifacts: all windows (PNG+CSV per window)."
 fi
 
+# Stitched full-test interactive HTML (Plotly) under rolling_window_forecasts/stitched_test_forecast.html:
+# first window's actual input, then all test horizons on real timestamps (median, band, actual).
+# Requires plotly on the compute node:  pip install plotly
+# Disable: sbatch --export=ALL,SAVE_STITCHED_TEST_HTML=0 run_transformer_tuning.sbatch
+SAVE_STITCHED_TEST_HTML=${SAVE_STITCHED_TEST_HTML:-1}
+STITCH_HTML_FLAGS=()
+if [ "${SAVE_STITCHED_TEST_HTML}" != "0" ] && [ "${SAVE_STITCHED_TEST_HTML}" != "no" ]; then
+  STITCH_HTML_FLAGS=(--save-stitched-test-html)
+  echo "Stitched test HTML: on (SAVE_STITCHED_TEST_HTML=${SAVE_STITCHED_TEST_HTML})."
+else
+  echo "Stitched test HTML: off."
+fi
+
 # Pre-split smoothing on --value-column (same as run_dlinear_tuning.sbatch / run_arima_tuning.sbatch): centered MA per CSV before windows.
 # Rolling-window PNGs plot that same smoothed value history and smoothed horizons (actual); predictions are raw model outputs unless --pred-smoothing-window>1 is set in train args.
 # Example: sbatch --export=ALL,TARGET_SMOOTHING_WINDOW=7 run_transformer_tuning.sbatch
@@ -197,7 +210,7 @@ mkdir -p "${RUNS}" "${BEST}"
 echo "Output directory root: ${ROOT}"
 
 # 1) Run candidate configs and save window plots for each candidate.
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${COMMON_QUANT[@]}" "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${COMMON_QUANT[@]}" "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${STITCH_HTML_FLAGS[@]}" "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
  
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
@@ -221,6 +234,7 @@ python -u rerun_best_sweep_with_plots.py \
   "${RERUN_DATA[@]}" \
   --value-column "${TARGET_COLUMN}" \
   "${FEATURE_FLAGS[@]}" \
+  "${STITCH_HTML_FLAGS[@]}" \
   "${COMMON_ROLLING[@]}" \
   ${COMMON_TRAIN} \
   ${COMMON_LOSS} \
@@ -235,6 +249,7 @@ echo ""
 echo "=== Forecast plot paths (relative to SCRIPT_DIR above) ==="
 echo "Sweep train output dir: ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/"
 echo "Sweep per-window PNGs:  ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/rolling_window_forecasts/plots/"
+echo "Stitched test HTML (if plotly installed): ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/rolling_window_forecasts/stitched_test_forecast.html"
 echo "Best rerun root:        ${SCRIPT_DIR}/${BEST}/"
 echo "(Python also prints 'Output directory' and 'Saved artifacts' with absolute paths in the log.)"
 if command -v find >/dev/null 2>&1; then
