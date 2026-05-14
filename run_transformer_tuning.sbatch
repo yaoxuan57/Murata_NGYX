@@ -229,7 +229,15 @@ python -u rerun_best_sweep_with_plots.py \
 python -u select_best_sweep_run.py --runs-root "${BEST}" --out-json "best_model_selection.json"
 
 echo "Transformer tuning completed. Mode=${RUN_TAG}"
-echo "Candidates ranking: ${RUNS}/sweep_run_ranking.csv"
-echo "Selected best candidate metadata: ${RUNS}/best_run_selection.json"
-echo "Candidate run plots under: ${RUNS}/<cfg>/rolling_window_forecasts/plots"
-echo "Best-model-only window plots under: ${BEST}/<best_cfg>/rolling_window_forecasts/plots"
+echo "Candidates ranking: ${SCRIPT_DIR}/${RUNS}/sweep_run_ranking.csv"
+echo "Selected best candidate metadata: ${SCRIPT_DIR}/${RUNS}/best_run_selection.json"
+echo ""
+echo "=== Forecast plot paths (relative to SCRIPT_DIR above) ==="
+echo "Sweep train output dir: ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/"
+echo "Sweep per-window PNGs:  ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/rolling_window_forecasts/plots/"
+echo "Best rerun root:        ${SCRIPT_DIR}/${BEST}/"
+echo "(Python also prints 'Output directory' and 'Saved artifacts' with absolute paths in the log.)"
+if command -v find >/dev/null 2>&1; then
+  echo "Best rerun plot dirs found:"
+  find "${SCRIPT_DIR}/${BEST}" -type d -path '*/rolling_window_forecasts/plots' 2>/dev/null | head -20 || true
+fi

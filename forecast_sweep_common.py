@@ -1366,6 +1366,7 @@ def run_sweep(
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
+    print(f"Output directory (this process): {os.path.abspath(args.output_dir)}")
 
     tr_path = args.train_csv
     va_path = args.val_csv
@@ -2275,16 +2276,35 @@ def run_sweep(
     ).to_csv(phase_composite_csv, index=False)
 
     sample_path = os.path.join(args.output_dir, "best_sample_forecast.csv")
+    _n_h = int(best_result["pred_len"])
+
+    def _col_1d_float(name: str, arr) -> np.ndarray:
+        out = np.asarray(arr, dtype=np.float64).reshape(-1)
+        if out.shape[0] != _n_h:
+            raise ValueError(
+                f"best_sample_forecast column {name!r}: length {out.shape[0]} != pred_len {_n_h}"
+            )
+        return out
+
+    _ts = best_result["sample_timestamps"]
+    _ts_list = pd.Series(_ts).astype(str).tolist()
+    if len(_ts_list) != _n_h:
+        raise ValueError(
+            f"best_sample_forecast timestamps: length {len(_ts_list)} != pred_len {_n_h}"
+        )
+
     _sample_cols = {
-        "timestamp": best_result["sample_timestamps"].astype(str).to_list(),
-        "actual": best_result["sample_true_raw"],
-        "predicted": best_result["sample_pred_raw"],
+        "timestamp": _ts_list,
+        "actual": _col_1d_float("actual", best_result["sample_true_raw"]),
+        "predicted": _col_1d_float("predicted", best_result["sample_pred_raw"]),
     }
     _bfq = best_result.get("forecast_quantiles")
     _samp_q = best_result.get("sample_preds_q_raw")
     if _bfq is not None and _samp_q is not None:
         for qi, qv in enumerate(_bfq):
-            _sample_cols[_quantile_column_name(qv)] = _samp_q[qi]
+            _sample_cols[_quantile_column_name(qv)] = _col_1d_float(
+                _quantile_column_name(qv), _samp_q[qi]
+            )
     pd.DataFrame(_sample_cols).to_csv(sample_path, index=False)
 
     save_plot(
@@ -2303,8 +2323,10 @@ def run_sweep(
     if _bfq is not None and _samp_q is not None and len(_bfq) >= 2:
         plt.figure(figsize=(10, 4))
         xdt = best_result["sample_timestamps"]
-        lo = _samp_q[0]
-        hi = _samp_q[-1]
+        lo = np.asarray(_samp_q[0], dtype=np.float64).reshape(-1)
+        hi = np.asarray(_samp_q[-1], dtype=np.float64).reshape(-1)
+        y_act = np.asarray(best_result["sample_true_raw"], dtype=np.float64).reshape(-1)
+        y_med = np.asarray(best_result["sample_pred_raw"], dtype=np.float64).reshape(-1)
         plt.fill_between(
             xdt,
             lo,
@@ -2313,8 +2335,8 @@ def run_sweep(
             alpha=0.22,
             label=prediction_interval_band_label(_bfq),
         )
-        plt.plot(xdt, best_result["sample_true_raw"], color="C0", label="Actual", linewidth=1.2)
-        plt.plot(xdt, best_result["sample_pred_raw"], color="C1", label="Predicted (median)", linewidth=1.0)
+        plt.plot(xdt, y_act, color="C0", label="Actual", linewidth=1.2)
+        plt.plot(xdt, y_med, color="C1", label="Predicted (median)", linewidth=1.0)
         plt.title(f"Single Forecast Window - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})")
         plt.xlabel("Date")
         plt.ylabel(args.value_column)
@@ -2526,6 +2548,9 @@ def run_sweep(
                 f"| loss×100 = {float(cv) * 100.0:.4f}%"
             )
 
+    rolling_plots_dir = os.path.join(rolling_windows_dir, "plots")
+    rolling_csv_dir = os.path.join(rolling_windows_dir, "csv")
+
     print("\nSaved artifacts:")
     print(f"- {summary_path}")
     print(f"- {history_path}")
@@ -2537,7 +2562,10 @@ def run_sweep(
     print(f"- {horizon_n_path}")
     print(f"- {horizon_bias_csv_path}")
     print(f"- {horizon_bias_png_path}")
-    print(f"- {rolling_windows_dir}")
+    print(f"- {rolling_windows_dir}/  (rolling_window_forecasts root)")
+    print(f"- {rolling_plots_dir}/  (per-window forecast PNGs — window_*.png)")
+    print(f"- {rolling_csv_dir}/  (per-window forecast CSVs)")
     print(f"- {rolling_combined_csv_path}")
     print(f"- {sample_path}")
+    print(f"- {os.path.join(args.output_dir, 'best_sample_forecast.png')}")
     print(f"- {checkpoint_path}")
