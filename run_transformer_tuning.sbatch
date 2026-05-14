@@ -33,6 +33,16 @@ COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 50 --min-de
 # Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
+# Per-step prediction band (pinball / quantile loss). Saved in best_config model_config for rerun.
+# Disable: sbatch --export=ALL,ENABLE_FORECAST_QUANTILES=0 run_transformer_tuning.sbatch
+ENABLE_FORECAST_QUANTILES=${ENABLE_FORECAST_QUANTILES:-1}
+COMMON_QUANT=()
+if [ "${ENABLE_FORECAST_QUANTILES}" != "0" ] && [ "${ENABLE_FORECAST_QUANTILES}" != "no" ]; then
+  COMMON_QUANT=(--forecast-quantiles 0.05 0.5 0.95)
+  echo "Quantile forecast: ${COMMON_QUANT[*]}"
+else
+  echo "Quantile forecast: off (point-only; ENABLE_FORECAST_QUANTILES=${ENABLE_FORECAST_QUANTILES})."
+fi
 TARGET_COLUMN=${TARGET_COLUMN:-"Acceleration RMS"}
 # Per-window rolling CSV/PNG under rolling_window_forecasts/ (full series still in all_windows_forecasts.csv).
 # Default: write artifacts for every test window. To cap disk use, set e.g.
@@ -187,7 +197,7 @@ mkdir -p "${RUNS}" "${BEST}"
 echo "Output directory root: ${ROOT}"
 
 # 1) Run candidate configs and save window plots for each candidate.
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${COMMON_QUANT[@]}" "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
  
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"

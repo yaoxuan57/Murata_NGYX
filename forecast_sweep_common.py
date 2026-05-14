@@ -222,6 +222,16 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         help="Stride on test window starts after uniform filter. 1 = every start (legacy). "
         "0 or negative = use the current pred_len (forecast length).",
     )
+    parser.add_argument(
+        "--forecast-quantiles",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="Q",
+        help="If set (e.g. 0.05 0.5 0.95), train pinball (quantile) loss per horizon step. "
+        "Requires a model that returns (batch, n_quantiles, pred_len), e.g. train_transformer_sweep. "
+        "Median slice is used for RMSE / trajectory metrics; CSVs include one column per quantile.",
+    )
     return parser
 
 
@@ -250,6 +260,19 @@ def mae_np(y_true, y_pred):
 def mape_np(y_true, y_pred):
     denom = np.maximum(np.abs(y_true), 1e-8)
     return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
+
+
+def smooth_forecast_quantile_horizons(preds: np.ndarray, window: int) -> np.ndarray:
+    """Centered MA on the last axis for (n_windows, n_quantiles, pred_len)."""
+    if window <= 1:
+        return preds
+    preds = np.asarray(preds, dtype=np.float32)
+    if preds.ndim != 3:
+        raise ValueError(f"Expected preds (N, Q, L), got shape {preds.shape}")
+    out = np.empty_like(preds, dtype=np.float32)
+    for q in range(preds.shape[1]):
+        out[:, q, :] = smooth_forecast_horizons(preds[:, q, :], window)
+    return out
 
 
 def smooth_forecast_horizons(preds: np.ndarray, window: int) -> np.ndarray:
@@ -825,6 +848,47 @@ class TrajectoryAwareLoss(nn.Module):
         )
 
 
+def _quantile_column_name(q: float) -> str:
+    s = f"{float(q):.6g}".replace(".", "p")
+    return f"predicted_q_{s}"
+
+
+def prediction_interval_band_label(quantiles) -> str:
+    if quantiles is None or len(quantiles) < 2:
+        return "Quantile band (low–high)"
+    lo, hi = float(quantiles[0]), float(quantiles[-1])
+    return f"~{100.0 * (hi - lo):.0f}% nominal band (q{lo:g}–q{hi:g})"
+
+
+def median_quantile_index(quantiles) -> int:
+    arr = np.asarray(quantiles, dtype=np.float64)
+    return int(np.argmin(np.abs(arr - 0.5)))
+
+
+class QuantileForecastLoss(nn.Module):
+    """Pinball loss per quantile on absolute (normalized) trajectories, shape (B, Q, L)."""
+
+    def __init__(self, pred_len: int, quantiles, tail_weight: float = 1.0):
+        super().__init__()
+        q = torch.tensor(list(quantiles), dtype=torch.float32)
+        if q.numel() < 2:
+            raise ValueError("forecast_quantiles must contain at least two levels.")
+        if not bool(torch.all(q[1:] >= q[:-1]).item()):
+            raise ValueError("forecast_quantiles must be sorted in ascending order (e.g. 0.05 0.5 0.95).")
+        self.register_buffer("quantiles", q)
+        tw = float(tail_weight)
+        w = torch.linspace(1.0, tw, pred_len, dtype=torch.float32)
+        self.register_buffer("w", w / w.mean())
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # pred, target: (B, Q, L)
+        err = target - pred
+        qv = self.quantiles.view(1, -1, 1).to(pred.device)
+        rho = torch.maximum(qv * err, (qv - 1.0) * err)
+        wt = self.w.view(1, 1, -1).to(pred.device)
+        return (rho * wt).mean()
+
+
 def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
     training = optimizer is not None
     model.train() if training else model.eval()
@@ -839,8 +903,13 @@ def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
             last_val = last_val.to(device)
 
             pred_delta = model(x)
-            pred_abs = pred_delta + last_val
-            true_abs = y_delta + last_val
+            if pred_delta.dim() == 3:
+                pred_abs = pred_delta + last_val.unsqueeze(1)
+                true_abs_1 = y_delta + last_val
+                true_abs = true_abs_1.unsqueeze(1).expand_as(pred_abs)
+            else:
+                pred_abs = pred_delta + last_val
+                true_abs = y_delta + last_val
             loss = criterion(pred_abs, true_abs)
 
             if training:
@@ -856,7 +925,7 @@ def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
     return total_loss / max(total_count, 1)
 
 
-def collect_predictions(model, loader, train_std, train_mean, device):
+def collect_predictions(model, loader, train_std, train_mean, device, forecast_quantiles=None):
     all_preds_abs_norm = []
     all_targets_abs_norm = []
 
@@ -868,8 +937,10 @@ def collect_predictions(model, loader, train_std, train_mean, device):
             last_val = last_val.to(device)
 
             pred_delta = model(x)
-
-            pred_abs_norm = pred_delta + last_val
+            if pred_delta.dim() == 3:
+                pred_abs_norm = pred_delta + last_val.unsqueeze(1)
+            else:
+                pred_abs_norm = pred_delta + last_val
             true_abs_norm = y_delta + last_val
 
             all_preds_abs_norm.append(pred_abs_norm.cpu().numpy())
@@ -880,11 +951,17 @@ def collect_predictions(model, loader, train_std, train_mean, device):
 
     all_preds_raw = all_preds_abs_norm * train_std + train_mean
     all_targets_raw = all_targets_abs_norm * train_std + train_mean
-    return all_preds_raw, all_targets_raw
+
+    if forecast_quantiles is None:
+        return all_preds_raw, all_targets_raw, None
+    mi = median_quantile_index(forecast_quantiles)
+    return all_preds_raw[:, mi, :], all_targets_raw, all_preds_raw
 
 
-def compute_window_rmse(model, loader, train_std, train_mean, device):
-    preds_raw, targets_raw = collect_predictions(model, loader, train_std, train_mean, device)
+def compute_window_rmse(model, loader, train_std, train_mean, device, forecast_quantiles=None):
+    preds_raw, targets_raw, _ = collect_predictions(
+        model, loader, train_std, train_mean, device, forecast_quantiles=forecast_quantiles
+    )
     window_rmse = np.sqrt(np.mean((targets_raw - preds_raw) ** 2, axis=1))
     return float(window_rmse.mean())
 
@@ -969,6 +1046,9 @@ def _plot_rolling_window_png(
     pred_smoothing_window: int = 1,
     hist_timestamps: Optional[pd.Series] = None,
     fore_timestamps: Optional[pd.Series] = None,
+    preds_low_row: Optional[np.ndarray] = None,
+    preds_high_row: Optional[np.ndarray] = None,
+    interval_label: str = "80% pred. interval",
 ):
     """Input history, horizon actual, and horizon predicted on one y-scale (raw target units)."""
 
@@ -1006,7 +1086,24 @@ def _plot_rolling_window_png(
     )
 
     ax.plot(x_fore, targets_row, color="C0", linewidth=1.3, label="Actual target", zorder=4)
-    ax.plot(x_fore, preds_row, color="C1", linewidth=1.1, label="Predicted target", zorder=4)
+    if (
+        preds_low_row is not None
+        and preds_high_row is not None
+        and len(preds_low_row) == pred_len
+        and len(preds_high_row) == pred_len
+    ):
+        lo = np.asarray(preds_low_row, dtype=np.float64)
+        hi = np.asarray(preds_high_row, dtype=np.float64)
+        ax.fill_between(
+            x_fore,
+            lo,
+            hi,
+            color="C1",
+            alpha=0.22,
+            label=interval_label,
+            zorder=3,
+        )
+    ax.plot(x_fore, preds_row, color="C1", linewidth=1.1, label="Predicted (median)", zorder=4)
     ax.set_title(
         f"Window {window_idx} — {input_context_label} input + forecast ({pred_len}-step)\n"
         f"{_forecast_smoothing_caption(pred_smoothing_window)}",
@@ -1043,6 +1140,9 @@ def save_rolling_window_forecasts(
     window_input_row_starts: Optional[np.ndarray] = None,
     input_context_label: str = "Acceleration RMS",
     pred_smoothing_window: int = 1,
+    preds_quantiles_raw: Optional[np.ndarray] = None,
+    forecast_quantiles: Optional[list] = None,
+    prediction_interval_label: str = "Quantile band (low–high)",
 ):
     windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
     plots_dir = os.path.join(windows_dir, "plots")
@@ -1081,15 +1181,23 @@ def save_rolling_window_forecasts(
         start_idx = row0 + input_len
         ts_window = timestamps.iloc[start_idx : start_idx + pred_len]
 
-        window_df = pd.DataFrame(
-            {
-                "window_index": [window_idx] * pred_len,
-                "step_ahead": np.arange(1, pred_len + 1),
-                "timestamp": ts_window.astype(str).to_list(),
-                "actual": targets_raw[window_idx],
-                "predicted": preds_raw[window_idx],
-            }
-        )
+        col_dict = {
+            "window_index": [window_idx] * pred_len,
+            "step_ahead": np.arange(1, pred_len + 1),
+            "timestamp": ts_window.astype(str).to_list(),
+            "actual": targets_raw[window_idx],
+            "predicted": preds_raw[window_idx],
+        }
+        preds_low_row = None
+        preds_high_row = None
+        if preds_quantiles_raw is not None and forecast_quantiles is not None:
+            pq = preds_quantiles_raw[window_idx]
+            for qi, qv in enumerate(forecast_quantiles):
+                col_dict[_quantile_column_name(qv)] = pq[qi]
+            preds_low_row = np.asarray(pq[0], dtype=np.float32)
+            preds_high_row = np.asarray(pq[-1], dtype=np.float32)
+
+        window_df = pd.DataFrame(col_dict)
 
         if window_idx in save_indices:
             window_csv_path = os.path.join(csv_dir, f"window_{window_idx:06d}.csv")
@@ -1126,11 +1234,23 @@ def save_rolling_window_forecasts(
                     pred_smoothing_window=pred_smoothing_window,
                     hist_timestamps=ts_hist,
                     fore_timestamps=ts_fore,
+                    preds_low_row=preds_low_row,
+                    preds_high_row=preds_high_row,
+                    interval_label=prediction_interval_label,
                 )
             else:
                 plt.figure(figsize=(8, 3))
+                if preds_low_row is not None and preds_high_row is not None:
+                    plt.fill_between(
+                        window_df["step_ahead"],
+                        preds_low_row,
+                        preds_high_row,
+                        alpha=0.25,
+                        color="C1",
+                        label=prediction_interval_label,
+                    )
                 plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
-                plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
+                plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted (median)")
                 plt.title(
                     f"Window {window_idx} Forecast ({pred_len}-step)\n"
                     f"{_forecast_smoothing_caption(pred_smoothing_window)}"
@@ -1171,6 +1291,13 @@ def save_rolling_window_forecasts(
                     sidx = rs + input_len
                     ts_hist = timestamps.iloc[rs : rs + input_len].reset_index(drop=True)
                     ts_fore = timestamps.iloc[sidx : sidx + pred_len].reset_index(drop=True)
+                    reg_lo = reg_hi = None
+                    if forecast_quantiles and len(forecast_quantiles) >= 2:
+                        c0 = _quantile_column_name(forecast_quantiles[0])
+                        c1 = _quantile_column_name(forecast_quantiles[-1])
+                        if c0 in window_df.columns and c1 in window_df.columns:
+                            reg_lo = window_df[c0].to_numpy(dtype=np.float32)
+                            reg_hi = window_df[c1].to_numpy(dtype=np.float32)
                     _plot_rolling_window_png(
                         window_idx=wix,
                         input_len=input_len,
@@ -1185,11 +1312,30 @@ def save_rolling_window_forecasts(
                         pred_smoothing_window=pred_smoothing_window,
                         hist_timestamps=ts_hist,
                         fore_timestamps=ts_fore,
+                        preds_low_row=reg_lo,
+                        preds_high_row=reg_hi,
+                        interval_label=prediction_interval_label,
                     )
                 else:
+                    e_lo = e_hi = None
+                    if forecast_quantiles and len(forecast_quantiles) >= 2:
+                        c0 = _quantile_column_name(forecast_quantiles[0])
+                        c1 = _quantile_column_name(forecast_quantiles[-1])
+                        if c0 in window_df.columns and c1 in window_df.columns:
+                            e_lo = window_df[c0].to_numpy(dtype=np.float32)
+                            e_hi = window_df[c1].to_numpy(dtype=np.float32)
                     plt.figure(figsize=(8, 3))
+                    if e_lo is not None and e_hi is not None:
+                        plt.fill_between(
+                            window_df["step_ahead"],
+                            e_lo,
+                            e_hi,
+                            alpha=0.25,
+                            color="C1",
+                            label=prediction_interval_label,
+                        )
                     plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
-                    plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted")
+                    plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted (median)")
                     plt.title(
                         f"Window {window_idx} Forecast ({pred_len}-step)\n"
                         f"{_forecast_smoothing_caption(pred_smoothing_window)}"
@@ -1701,17 +1847,40 @@ def run_sweep(
                 val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
                 test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
+                fq = getattr(args, "forecast_quantiles", None)
+                if fq is not None and len(fq) == 0:
+                    fq = None
+
                 model = model_factory(input_len, pred_len, args, device)
-                criterion = TrajectoryAwareLoss(
-                    pred_len=pred_len,
-                    delta=args.loss_huber_delta,
-                    point_weight=args.loss_point_weight,
-                    diff_weight=args.loss_diff_weight,
-                    curvature_weight=args.loss_curvature_weight,
-                    variance_weight=args.loss_variance_weight,
-                    laplacian_reg_weight=args.loss_laplacian_weight,
-                    tail_weight=args.loss_tail_weight,
-                ).to(device)
+                if fq is not None:
+                    if len(fq) < 2:
+                        raise ValueError(
+                            "--forecast-quantiles requires at least two levels (e.g. 0.05 0.5 0.95)."
+                        )
+                    with torch.no_grad():
+                        x_probe, _, _ = next(iter(train_loader))
+                        pr = model(x_probe[:1].to(device))
+                    if pr.dim() != 3 or pr.shape[1] != len(fq):
+                        raise ValueError(
+                            f"--forecast-quantiles requires model output (batch, Q={len(fq)}, pred_len); "
+                            f"got shape {tuple(pr.shape)}. Use train_transformer_sweep.py with the quantile head."
+                        )
+                    criterion = QuantileForecastLoss(
+                        pred_len,
+                        fq,
+                        tail_weight=args.loss_tail_weight,
+                    ).to(device)
+                else:
+                    criterion = TrajectoryAwareLoss(
+                        pred_len=pred_len,
+                        delta=args.loss_huber_delta,
+                        point_weight=args.loss_point_weight,
+                        diff_weight=args.loss_diff_weight,
+                        curvature_weight=args.loss_curvature_weight,
+                        variance_weight=args.loss_variance_weight,
+                        laplacian_reg_weight=args.loss_laplacian_weight,
+                        tail_weight=args.loss_tail_weight,
+                    ).to(device)
                 optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
                 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer,
@@ -1741,10 +1910,18 @@ def run_sweep(
                         "(applied to predictions only; validation RMSE during training is unsmoothed)."
                     )
 
+                if fq is not None:
+                    print(
+                        f"Forecast quantiles (pinball loss, median for RMSE): {list(fq)} "
+                        "(prediction band = lowest–highest quantile in this list)."
+                    )
+
                 for epoch in range(1, args.epochs + 1):
                     train_loss = run_epoch(model, train_loader, criterion, optimizer, device)
                     val_loss = run_epoch(model, val_loader, criterion, optimizer=None, device=device)
-                    val_window_rmse = compute_window_rmse(model, val_loader, train_std, train_mean, device)
+                    val_window_rmse = compute_window_rmse(
+                        model, val_loader, train_std, train_mean, device, forecast_quantiles=fq
+                    )
                     scheduler.step(val_loss)
                     current_lr = optimizer.param_groups[0]["lr"]
 
@@ -1782,8 +1959,22 @@ def run_sweep(
                 )
                 test_composite_loss_pct = float(test_composite_loss) * 100.0
 
-                all_preds_raw, all_targets_raw = collect_predictions(model, test_loader, train_std, train_mean, device)
-                if args.pred_smoothing_window > 1:
+                all_preds_raw, all_targets_raw, preds_q_raw = collect_predictions(
+                    model, test_loader, train_std, train_mean, device, forecast_quantiles=fq
+                )
+                preds_quantiles_arr = None
+                if fq is not None:
+                    preds_quantiles_arr = np.asarray(preds_q_raw, dtype=np.float32, copy=True)
+                    if args.pred_smoothing_window > 1:
+                        preds_quantiles_arr = smooth_forecast_quantile_horizons(
+                            preds_quantiles_arr, args.pred_smoothing_window
+                        )
+                    all_preds_raw = np.asarray(
+                        preds_quantiles_arr[:, median_quantile_index(fq), :],
+                        dtype=np.float32,
+                        copy=False,
+                    )
+                elif args.pred_smoothing_window > 1:
                     all_preds_raw = smooth_forecast_horizons(all_preds_raw, args.pred_smoothing_window)
                 metrics = evaluate_metrics(all_targets_raw, all_preds_raw)
                 baseline = baseline_rmse(test_loader, pred_len, train_std, train_mean)
@@ -1809,11 +2000,21 @@ def run_sweep(
                 with torch.no_grad():
                     pred_delta = model(x.unsqueeze(0).to(device)).cpu().numpy()[0]
 
-                last_val = float(last_val.numpy()[0])
-                pred_raw = (pred_delta + last_val) * train_std + train_mean
-                true_raw = (y_delta.numpy() + last_val) * train_std + train_mean
-                if args.pred_smoothing_window > 1:
-                    pred_raw = smooth_forecast_vector(pred_raw, args.pred_smoothing_window)
+                last_val_f = float(last_val.numpy()[0])
+                true_raw = (y_delta.numpy() + last_val_f) * train_std + train_mean
+                sample_preds_q_raw = None
+                if pred_delta.ndim == 2:
+                    pred_raw = (pred_delta + last_val_f) * train_std + train_mean
+                    if args.pred_smoothing_window > 1:
+                        pred_raw = smooth_forecast_vector(pred_raw, args.pred_smoothing_window)
+                else:
+                    qa = (pred_delta + last_val_f) * train_std + train_mean
+                    if args.pred_smoothing_window > 1:
+                        for qi in range(qa.shape[0]):
+                            qa[qi] = smooth_forecast_vector(qa[qi], args.pred_smoothing_window)
+                    sample_preds_q_raw = np.asarray(qa, dtype=np.float32)
+                    _mi = median_quantile_index(fq) if fq is not None else int(qa.shape[0] // 2)
+                    pred_raw = np.asarray(qa[_mi], dtype=np.float32)
 
                 ts_off = int(test_dataset.sample_starts[sample_idx])
                 pred_ts = df_test["TIMESTAMP"].iloc[ts_off + input_len : ts_off + input_len + pred_len]
@@ -1835,8 +2036,11 @@ def run_sweep(
                         "horizon_phase_h_ranges": horizon_phase_h_ranges,
                         "all_preds_raw": all_preds_raw,
                         "all_targets_raw": all_targets_raw,
+                        "forecast_quantiles": list(fq) if fq is not None else None,
+                        "preds_quantiles_raw": preds_quantiles_arr,
                         "sample_pred_raw": pred_raw,
                         "sample_true_raw": true_raw,
+                        "sample_preds_q_raw": sample_preds_q_raw,
                         "sample_timestamps": pred_ts,
                         "test_sample_starts": np.asarray(test_dataset.sample_starts, dtype=np.int64).copy(),
                         "train_mean": float(train_mean),
@@ -1946,6 +2150,7 @@ def run_sweep(
             }
             for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_composite"])
         ],
+        "forecast_quantiles": best_result.get("forecast_quantiles"),
     }
     with open(metrics_path, "w", encoding="utf-8") as fp:
         json.dump(metrics_payload, fp, indent=2)
@@ -2040,6 +2245,7 @@ def run_sweep(
             }
             for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_composite"])
         ],
+        "forecast_quantiles": best_result.get("forecast_quantiles"),
     }
     with open(best_config_path, "w", encoding="utf-8") as fp:
         json.dump(best_config_payload, fp, indent=2)
@@ -2070,13 +2276,17 @@ def run_sweep(
     ).to_csv(phase_composite_csv, index=False)
 
     sample_path = os.path.join(args.output_dir, "best_sample_forecast.csv")
-    pd.DataFrame(
-        {
-            "timestamp": best_result["sample_timestamps"].astype(str).to_list(),
-            "actual": best_result["sample_true_raw"],
-            "predicted": best_result["sample_pred_raw"],
-        }
-    ).to_csv(sample_path, index=False)
+    _sample_cols = {
+        "timestamp": best_result["sample_timestamps"].astype(str).to_list(),
+        "actual": best_result["sample_true_raw"],
+        "predicted": best_result["sample_pred_raw"],
+    }
+    _bfq = best_result.get("forecast_quantiles")
+    _samp_q = best_result.get("sample_preds_q_raw")
+    if _bfq is not None and _samp_q is not None:
+        for qi, qv in enumerate(_bfq):
+            _sample_cols[_quantile_column_name(qv)] = _samp_q[qi]
+    pd.DataFrame(_sample_cols).to_csv(sample_path, index=False)
 
     save_plot(
         path=os.path.join(args.output_dir, "best_learning_curve.png"),
@@ -2090,18 +2300,44 @@ def run_sweep(
         y2_label="Val loss",
     )
 
-    save_plot(
-        path=os.path.join(args.output_dir, "best_sample_forecast.png"),
-        title=f"Single Forecast Window - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
-        x_label="Date",
-        y_label=args.value_column,
-        x=best_result["sample_timestamps"],
-        y1=best_result["sample_true_raw"],
-        y1_label="Actual forecast",
-        y2=best_result["sample_pred_raw"],
-        y2_label="Predicted forecast",
-        rotate_dates=True,
-    )
+    _sample_png = os.path.join(args.output_dir, "best_sample_forecast.png")
+    if _bfq is not None and _samp_q is not None and len(_bfq) >= 2:
+        plt.figure(figsize=(10, 4))
+        xdt = best_result["sample_timestamps"]
+        lo = _samp_q[0]
+        hi = _samp_q[-1]
+        plt.fill_between(
+            xdt,
+            lo,
+            hi,
+            color="C1",
+            alpha=0.22,
+            label=prediction_interval_band_label(_bfq),
+        )
+        plt.plot(xdt, best_result["sample_true_raw"], color="C0", label="Actual", linewidth=1.2)
+        plt.plot(xdt, best_result["sample_pred_raw"], color="C1", label="Predicted (median)", linewidth=1.0)
+        plt.title(f"Single Forecast Window - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})")
+        plt.xlabel("Date")
+        plt.ylabel(args.value_column)
+        plt.legend(loc="best", fontsize=8)
+        plt.grid(True, alpha=0.35)
+        plt.gcf().autofmt_xdate()
+        plt.tight_layout()
+        plt.savefig(_sample_png, dpi=150)
+        plt.close()
+    else:
+        save_plot(
+            path=_sample_png,
+            title=f"Single Forecast Window - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
+            x_label="Date",
+            y_label=args.value_column,
+            x=best_result["sample_timestamps"],
+            y1=best_result["sample_true_raw"],
+            y1_label="Actual forecast",
+            y2=best_result["sample_pred_raw"],
+            y2_label="Predicted forecast",
+            rotate_dates=True,
+        )
 
     starts = np.asarray(best_result["test_sample_starts"], dtype=np.int64)
     h = 0
@@ -2210,6 +2446,8 @@ def run_sweep(
     rolling_input_hist = test_series
     rolling_input_label = str(args.value_column)
 
+    _roll_q = best_result.get("preds_quantiles_raw")
+    _roll_fq = best_result.get("forecast_quantiles")
     rolling_windows_dir, rolling_combined_csv_path = save_rolling_window_forecasts(
         output_dir=args.output_dir,
         preds_raw=best_result["all_preds_raw"],
@@ -2224,6 +2462,9 @@ def run_sweep(
         window_input_row_starts=starts,
         input_context_label=rolling_input_label,
         pred_smoothing_window=args.pred_smoothing_window,
+        preds_quantiles_raw=_roll_q,
+        forecast_quantiles=_roll_fq,
+        prediction_interval_label=prediction_interval_band_label(_roll_fq),
     )
 
     save_plot(

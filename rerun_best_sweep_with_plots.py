@@ -135,6 +135,13 @@ def model_config_to_flags(model_config, train_script: str):
         flag = f"--{key.replace('_', '-')}"
         if isinstance(value, bool):
             args.append(flag if value else f"--no-{key.replace('_', '-')}")
+        elif value is None:
+            continue
+        elif isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                continue
+            args.append(flag)
+            args.extend(str(v) for v in value)
         else:
             args.extend([flag, str(value)])
     return args
