@@ -1972,7 +1972,6 @@ def run_sweep(
                     all_preds_raw = np.asarray(
                         preds_quantiles_arr[:, median_quantile_index(fq), :],
                         dtype=np.float32,
-                        copy=False,
                     )
                 elif args.pred_smoothing_window > 1:
                     all_preds_raw = smooth_forecast_horizons(all_preds_raw, args.pred_smoothing_window)
