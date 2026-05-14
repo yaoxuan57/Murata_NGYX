@@ -2002,19 +2002,25 @@ def run_sweep(
 
                 last_val_f = float(last_val.numpy()[0])
                 true_raw = (y_delta.numpy() + last_val_f) * train_std + train_mean
+                true_raw = np.asarray(true_raw, dtype=np.float64).reshape(-1)
                 sample_preds_q_raw = None
-                if pred_delta.ndim == 2:
-                    pred_raw = (pred_delta + last_val_f) * train_std + train_mean
-                    if args.pred_smoothing_window > 1:
-                        pred_raw = smooth_forecast_vector(pred_raw, args.pred_smoothing_window)
-                else:
+                if fq is not None:
+                    if pred_delta.ndim != 2 or int(pred_delta.shape[0]) != len(fq):
+                        raise ValueError(
+                            f"Quantile mode: expected model output shape (n_quantiles={len(fq)}, pred_len), "
+                            f"got {getattr(pred_delta, 'shape', None)} (ndim={getattr(pred_delta, 'ndim', None)})."
+                        )
                     qa = (pred_delta + last_val_f) * train_std + train_mean
                     if args.pred_smoothing_window > 1:
                         for qi in range(qa.shape[0]):
                             qa[qi] = smooth_forecast_vector(qa[qi], args.pred_smoothing_window)
                     sample_preds_q_raw = np.asarray(qa, dtype=np.float32)
-                    _mi = median_quantile_index(fq) if fq is not None else int(qa.shape[0] // 2)
-                    pred_raw = np.asarray(qa[_mi], dtype=np.float32)
+                    pred_raw = np.asarray(qa[median_quantile_index(fq)], dtype=np.float32)
+                else:
+                    pd_vec = np.asarray(pred_delta, dtype=np.float64).reshape(-1)
+                    pred_raw = (pd_vec + last_val_f) * train_std + train_mean
+                    if args.pred_smoothing_window > 1:
+                        pred_raw = smooth_forecast_vector(pred_raw, args.pred_smoothing_window)
 
                 ts_off = int(test_dataset.sample_starts[sample_idx])
                 pred_ts = df_test["TIMESTAMP"].iloc[ts_off + input_len : ts_off + input_len + pred_len]
