@@ -1964,7 +1964,7 @@ def run_sweep(
                 )
                 preds_quantiles_arr = None
                 if fq is not None:
-                    preds_quantiles_arr = np.asarray(preds_q_raw, dtype=np.float32, copy=True)
+                    preds_quantiles_arr = np.asarray(preds_q_raw, dtype=np.float32).copy()
                     if args.pred_smoothing_window > 1:
                         preds_quantiles_arr = smooth_forecast_quantile_horizons(
                             preds_quantiles_arr, args.pred_smoothing_window
