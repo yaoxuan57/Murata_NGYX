@@ -1140,38 +1140,112 @@ def _plot_rolling_window_png(
     plt.close(fig)
 
 
-def _infer_plot_time_gap_threshold(ts_series: pd.Series) -> pd.Timedelta:
-    """Typical sampling step × 4, floored at 1 hour — larger calendar gaps do not draw connecting lines."""
+def _stitched_plot_gap_threshold(
+    ts_series: pd.Series,
+    max_consecutive_gap_seconds: Optional[float] = None,
+) -> pd.Timedelta:
+    """Break plot lines when Δt exceeds allowed consecutive gap (same idea as window filtering)."""
+    if max_consecutive_gap_seconds is not None and float(max_consecutive_gap_seconds) > 0:
+        return pd.Timedelta(seconds=float(max_consecutive_gap_seconds) * 1.01)
     if ts_series is None or len(ts_series) < 2:
-        return pd.Timedelta(days=1)
+        return pd.Timedelta(hours=1)
     diff = pd.to_datetime(ts_series, errors="coerce").diff()
     secs = diff.dt.total_seconds().to_numpy(dtype=np.float64)[1:]
     secs = secs[np.isfinite(secs) & (secs > 0)]
     if secs.size == 0:
-        return pd.Timedelta(hours=6)
+        return pd.Timedelta(hours=1)
     med = float(np.nanmedian(secs))
-    step_sec = max(med, 60.0)
-    thresh_sec = max(step_sec * 4.0, float(pd.Timedelta(hours=1).total_seconds()))
-    return pd.Timedelta(seconds=thresh_sec)
+    return pd.Timedelta(seconds=max(med * 2.0, 300.0))
 
 
-def _plotly_xy_break_calendar_gaps(
-    x_list: list, y_list: list, gap_threshold: pd.Timedelta
-) -> tuple[list, list]:
-    """Insert None in x and y wherever consecutive timestamps jump by more than gap_threshold."""
+def _split_xy_at_time_gaps(
+    x_list: list,
+    y_list: list,
+    gap_threshold: pd.Timedelta,
+) -> list[tuple[list, list]]:
+    """Split (x, y) into contiguous segments; no line is drawn across a gap larger than gap_threshold."""
     if not x_list or len(x_list) != len(y_list):
-        return list(x_list), list(y_list)
-    out_x: list = []
-    out_y: list = []
+        return []
+    segments: list[tuple[list, list]] = []
+    seg_x: list = []
+    seg_y: list = []
     for i in range(len(x_list)):
         if i > 0:
             dt = pd.Timestamp(x_list[i]) - pd.Timestamp(x_list[i - 1])
             if dt > gap_threshold:
-                out_x.append(None)
-                out_y.append(None)
-        out_x.append(x_list[i])
-        out_y.append(y_list[i])
-    return out_x, out_y
+                if seg_x:
+                    segments.append((seg_x, seg_y))
+                seg_x = []
+                seg_y = []
+        seg_x.append(x_list[i])
+        seg_y.append(y_list[i])
+    if seg_x:
+        segments.append((seg_x, seg_y))
+    return segments
+
+
+def _plotly_add_line_segments(
+    fig,
+    segments: list[tuple[list, list]],
+    *,
+    name: str,
+    line: dict,
+    legendgroup: Optional[str] = None,
+) -> None:
+    import plotly.graph_objects as go
+
+    grp = legendgroup or name
+    for i, (xs, ys) in enumerate(segments):
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines",
+                name=name,
+                legendgroup=grp,
+                showlegend=(i == 0),
+                connectgaps=False,
+                line=line,
+            )
+        )
+
+
+def _plotly_add_band_segments(
+    fig,
+    segments: list[tuple[list, list, list]],
+    *,
+    name: str,
+    fillcolor: str,
+) -> None:
+    """segments: list of (x, y_lo, y_hi) per contiguous time run."""
+    import plotly.graph_objects as go
+
+    for i, (xs, y_lo, y_hi) in enumerate(segments):
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=y_hi,
+                mode="lines",
+                line=dict(width=0),
+                legendgroup=name,
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=y_lo,
+                mode="lines",
+                line=dict(width=0),
+                fillcolor=fillcolor,
+                fill="tonexty",
+                name=name,
+                legendgroup=name,
+                showlegend=(i == 0),
+                hoverinfo="skip",
+            )
+        )
 
 
 def save_stitched_test_forecast_html(
@@ -1189,6 +1263,7 @@ def save_stitched_test_forecast_html(
     preds_quantiles_raw: Optional[np.ndarray] = None,
     forecast_quantiles: Optional[list] = None,
     prediction_interval_label: str = "Quantile band (low–high)",
+    max_consecutive_gap_seconds: Optional[float] = None,
 ) -> Optional[str]:
     """One interactive HTML: first window input (actual) + stitched test horizons on real time axis."""
     try:
@@ -1264,74 +1339,62 @@ def save_stitched_test_forecast_html(
         and np.any(np.isfinite(np.asarray(y_hi)))
     )
 
-    gap_thr = _infer_plot_time_gap_threshold(x_in if len(x_in) >= 2 else fd["ts"])
-    x_in_p, y_in_p = _plotly_xy_break_calendar_gaps(x_in.tolist(), y_in.tolist(), gap_thr)
-    xf_p, ya_p = _plotly_xy_break_calendar_gaps(xf, ya, gap_thr)
-    _, yp_p = _plotly_xy_break_calendar_gaps(xf, yp, gap_thr)
-    _, y_hi_p = _plotly_xy_break_calendar_gaps(xf, y_hi, gap_thr)
-    _, y_lo_p = _plotly_xy_break_calendar_gaps(xf, y_lo, gap_thr)
+    gap_thr = _stitched_plot_gap_threshold(
+        x_in if len(x_in) >= 2 else fd["ts"],
+        max_consecutive_gap_seconds=max_consecutive_gap_seconds,
+    )
+    in_segments = _split_xy_at_time_gaps(x_in.tolist(), y_in.tolist(), gap_thr)
+    actual_segments = _split_xy_at_time_gaps(xf, ya, gap_thr)
+    pred_segments = _split_xy_at_time_gaps(xf, yp, gap_thr)
+    band_segments: list[tuple[list, list, list]] = []
+    if has_band:
+        lo_parts = _split_xy_at_time_gaps(xf, y_lo, gap_thr)
+        hi_parts = _split_xy_at_time_gaps(xf, y_hi, gap_thr)
+        for (xs_lo, ys_lo), (xs_hi, ys_hi) in zip(lo_parts, hi_parts):
+            band_segments.append((xs_lo, ys_lo, ys_hi))
 
     t_last_in = pd.Timestamp(x_in.iloc[-1])
     t_first_out = pd.Timestamp(xf[0])
     boundary_x = t_last_in + (t_first_out - t_last_in) / 2
+    show_boundary = (t_first_out - t_last_in) <= gap_thr
 
     fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=x_in_p,
-            y=y_in_p,
-            mode="lines",
-            name=f"{input_context_label} — input",
-            line=dict(color="rgba(90, 90, 90, 0.95)", width=1.1),
-        )
+    _plotly_add_line_segments(
+        fig,
+        in_segments,
+        name=f"{input_context_label} — input",
+        line=dict(color="rgba(90, 90, 90, 0.95)", width=1.1),
     )
     if has_band:
-        fig.add_trace(
-            go.Scatter(
-                x=xf_p,
-                y=y_hi_p,
-                mode="lines",
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo="skip",
-            )
+        _plotly_add_band_segments(
+            fig,
+            band_segments,
+            name=prediction_interval_label,
+            fillcolor="rgba(255, 165, 0, 0.22)",
         )
-        fig.add_trace(
-            go.Scatter(
-                x=xf_p,
-                y=y_lo_p,
-                mode="lines",
-                line=dict(width=0),
-                fillcolor="rgba(255, 165, 0, 0.22)",
-                fill="tonexty",
-                name=prediction_interval_label,
-                hoverinfo="skip",
-            )
-        )
-    fig.add_trace(
-        go.Scatter(
-            x=xf_p,
-            y=ya_p,
-            mode="lines",
-            name="Actual target",
-            line=dict(color="#1f77b4", width=1.35),
-        )
+    _plotly_add_line_segments(
+        fig,
+        actual_segments,
+        name="Actual target",
+        line=dict(color="#1f77b4", width=1.35),
     )
-    fig.add_trace(
-        go.Scatter(
-            x=xf_p,
-            y=yp_p,
-            mode="lines",
-            name="Predicted (median)",
-            line=dict(color="#ff7f0e", width=1.15),
-        )
+    _plotly_add_line_segments(
+        fig,
+        pred_segments,
+        name="Predicted (median)",
+        line=dict(color="#ff7f0e", width=1.15),
     )
 
     subtitle = _forecast_smoothing_caption(pred_smoothing_window)
     _gap_h = gap_thr.total_seconds() / 3600.0
+    _gap_rule = (
+        f"max consecutive TIMESTAMP gap ({max_consecutive_gap_seconds:g}s)"
+        if max_consecutive_gap_seconds
+        else "2× median Δt (≥5 min)"
+    )
     subtitle += (
-        f"<br><span style='font-size:11px'>Line segments break when consecutive points are farther apart than "
-        f"max(4× median input Δt, 1h) (~{_gap_h:.2f}h here); no connector across long empty calendar gaps.</span>"
+        f"<br><span style='font-size:11px'>Each line/band segment is drawn only where consecutive timestamps are "
+        f"≤ {_gap_h:.2f}h apart ({_gap_rule}); no connectors across longer empty periods.</span>"
     )
     if collapsed:
         subtitle += (
@@ -1339,7 +1402,8 @@ def save_stitched_test_forecast_html(
             f"{n_before} horizon points → {n_after} unique timestamps (last window kept per time).</span>"
         )
 
-    fig.add_vline(x=boundary_x, line_dash="dash", line_color="rgba(120,120,120,0.95)", line_width=1.2)
+    if show_boundary:
+        fig.add_vline(x=boundary_x, line_dash="dash", line_color="rgba(120,120,120,0.95)", line_width=1.2)
     fig.update_layout(
         title=(
             f"Stitched test set — {input_context_label} input + concatenated horizons ({pred_len}-step)<br>"
@@ -2756,6 +2820,7 @@ def run_sweep(
             preds_quantiles_raw=_roll_q,
             forecast_quantiles=_roll_fq,
             prediction_interval_label=prediction_interval_band_label(_roll_fq),
+            max_consecutive_gap_seconds=args.max_consecutive_timestamp_gap_seconds,
         )
 
     save_plot(
