@@ -1140,6 +1140,40 @@ def _plot_rolling_window_png(
     plt.close(fig)
 
 
+def _infer_plot_time_gap_threshold(ts_series: pd.Series) -> pd.Timedelta:
+    """Typical sampling step × 4, floored at 1 hour — larger calendar gaps do not draw connecting lines."""
+    if ts_series is None or len(ts_series) < 2:
+        return pd.Timedelta(days=1)
+    diff = pd.to_datetime(ts_series, errors="coerce").diff()
+    secs = diff.dt.total_seconds().to_numpy(dtype=np.float64)[1:]
+    secs = secs[np.isfinite(secs) & (secs > 0)]
+    if secs.size == 0:
+        return pd.Timedelta(hours=6)
+    med = float(np.nanmedian(secs))
+    step_sec = max(med, 60.0)
+    thresh_sec = max(step_sec * 4.0, float(pd.Timedelta(hours=1).total_seconds()))
+    return pd.Timedelta(seconds=thresh_sec)
+
+
+def _plotly_xy_break_calendar_gaps(
+    x_list: list, y_list: list, gap_threshold: pd.Timedelta
+) -> tuple[list, list]:
+    """Insert None in x and y wherever consecutive timestamps jump by more than gap_threshold."""
+    if not x_list or len(x_list) != len(y_list):
+        return list(x_list), list(y_list)
+    out_x: list = []
+    out_y: list = []
+    for i in range(len(x_list)):
+        if i > 0:
+            dt = pd.Timestamp(x_list[i]) - pd.Timestamp(x_list[i - 1])
+            if dt > gap_threshold:
+                out_x.append(None)
+                out_y.append(None)
+        out_x.append(x_list[i])
+        out_y.append(y_list[i])
+    return out_x, out_y
+
+
 def save_stitched_test_forecast_html(
     html_path: str,
     timestamps: pd.Series,
@@ -1230,6 +1264,13 @@ def save_stitched_test_forecast_html(
         and np.any(np.isfinite(np.asarray(y_hi)))
     )
 
+    gap_thr = _infer_plot_time_gap_threshold(x_in if len(x_in) >= 2 else fd["ts"])
+    x_in_p, y_in_p = _plotly_xy_break_calendar_gaps(x_in.tolist(), y_in.tolist(), gap_thr)
+    xf_p, ya_p = _plotly_xy_break_calendar_gaps(xf, ya, gap_thr)
+    _, yp_p = _plotly_xy_break_calendar_gaps(xf, yp, gap_thr)
+    _, y_hi_p = _plotly_xy_break_calendar_gaps(xf, y_hi, gap_thr)
+    _, y_lo_p = _plotly_xy_break_calendar_gaps(xf, y_lo, gap_thr)
+
     t_last_in = pd.Timestamp(x_in.iloc[-1])
     t_first_out = pd.Timestamp(xf[0])
     boundary_x = t_last_in + (t_first_out - t_last_in) / 2
@@ -1237,8 +1278,8 @@ def save_stitched_test_forecast_html(
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=x_in.tolist(),
-            y=y_in.tolist(),
+            x=x_in_p,
+            y=y_in_p,
             mode="lines",
             name=f"{input_context_label} — input",
             line=dict(color="rgba(90, 90, 90, 0.95)", width=1.1),
@@ -1247,8 +1288,8 @@ def save_stitched_test_forecast_html(
     if has_band:
         fig.add_trace(
             go.Scatter(
-                x=xf,
-                y=y_hi,
+                x=xf_p,
+                y=y_hi_p,
                 mode="lines",
                 line=dict(width=0),
                 showlegend=False,
@@ -1257,8 +1298,8 @@ def save_stitched_test_forecast_html(
         )
         fig.add_trace(
             go.Scatter(
-                x=xf,
-                y=y_lo,
+                x=xf_p,
+                y=y_lo_p,
                 mode="lines",
                 line=dict(width=0),
                 fillcolor="rgba(255, 165, 0, 0.22)",
@@ -1269,8 +1310,8 @@ def save_stitched_test_forecast_html(
         )
     fig.add_trace(
         go.Scatter(
-            x=xf,
-            y=ya,
+            x=xf_p,
+            y=ya_p,
             mode="lines",
             name="Actual target",
             line=dict(color="#1f77b4", width=1.35),
@@ -1278,8 +1319,8 @@ def save_stitched_test_forecast_html(
     )
     fig.add_trace(
         go.Scatter(
-            x=xf,
-            y=yp,
+            x=xf_p,
+            y=yp_p,
             mode="lines",
             name="Predicted (median)",
             line=dict(color="#ff7f0e", width=1.15),
@@ -1287,6 +1328,11 @@ def save_stitched_test_forecast_html(
     )
 
     subtitle = _forecast_smoothing_caption(pred_smoothing_window)
+    _gap_h = gap_thr.total_seconds() / 3600.0
+    subtitle += (
+        f"<br><span style='font-size:11px'>Line segments break when consecutive points are farther apart than "
+        f"max(4× median input Δt, 1h) (~{_gap_h:.2f}h here); no connector across long empty calendar gaps.</span>"
+    )
     if collapsed:
         subtitle += (
             f"<br><span style='font-size:11px'>Overlapping test windows: "
@@ -2103,6 +2149,11 @@ def run_sweep(
                         f"Forecast quantiles (pinball loss, median for RMSE): {list(fq)} "
                         "(prediction band = lowest–highest quantile in this list)."
                     )
+                    print(
+                        "Per-epoch metrics: train_pinball / val_pinball = mean quantile (pinball) loss "
+                        "(same criterion; val uses eval mode so dropout is off — val pinball often reads "
+                        "lower than train). val_median_rmse = RMSE of the median quantile forecast only."
+                    )
 
                 for epoch in range(1, args.epochs + 1):
                     train_loss = run_epoch(model, train_loader, criterion, optimizer, device)
@@ -2123,10 +2174,16 @@ def run_sweep(
                         }
                     )
 
-                    print(
-                        f"Epoch {epoch:03d} | train={train_loss:.6f} | val={val_loss:.6f} "
-                        f"| val_window_rmse={val_window_rmse:.6f} | lr={current_lr:.2e}"
-                    )
+                    if fq is not None:
+                        print(
+                            f"Epoch {epoch:03d} | train_pinball={train_loss:.6f} | val_pinball={val_loss:.6f} "
+                            f"| val_median_rmse={val_window_rmse:.6f} | lr={current_lr:.2e}"
+                        )
+                    else:
+                        print(
+                            f"Epoch {epoch:03d} | train={train_loss:.6f} | val={val_loss:.6f} "
+                            f"| val_window_rmse={val_window_rmse:.6f} | lr={current_lr:.2e}"
+                        )
 
                     if val_loss < best_val_loss - args.min_delta:
                         best_val_loss = val_loss

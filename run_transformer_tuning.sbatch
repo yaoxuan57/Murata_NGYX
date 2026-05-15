@@ -33,6 +33,10 @@ COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 50 --min-de
 # Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
+# AdamW decoupled weight decay (PyTorch --weight-decay). Default 1e-4 is a common starting point for small transformers;
+# use 0 to match older runs, or try 1e-3 / 1e-2 if you still see overfit (often pair smaller --lr with larger decay).
+WEIGHT_DECAY=${WEIGHT_DECAY:-1e-4}
+echo "AdamW weight decay: ${WEIGHT_DECAY} (override: sbatch --export=ALL,WEIGHT_DECAY=1e-3,...)"
 # Per-step prediction band (pinball / quantile loss). Saved in best_config model_config for rerun.
 # Disable: sbatch --export=ALL,ENABLE_FORECAST_QUANTILES=0 run_transformer_tuning.sbatch
 ENABLE_FORECAST_QUANTILES=${ENABLE_FORECAST_QUANTILES:-1}
@@ -209,8 +213,10 @@ mkdir -p "${RUNS}" "${BEST}"
 
 echo "Output directory root: ${ROOT}"
 
+SWEEP_RUN_TAG="cfg_288_k11_lr5e4_wd${WEIGHT_DECAY}"
+
 # 1) Run candidate configs and save window plots for each candidate.
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${COMMON_QUANT[@]}" "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${STITCH_HTML_FLAGS[@]}" "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay 0 --output-dir "${RUNS}/cfg_288_k11_lr5e4"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${COMMON_QUANT[@]}" "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${STITCH_HTML_FLAGS[@]}" "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay "${WEIGHT_DECAY}" --output-dir "${RUNS}/${SWEEP_RUN_TAG}"
  
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"
@@ -247,9 +253,9 @@ echo "Candidates ranking: ${SCRIPT_DIR}/${RUNS}/sweep_run_ranking.csv"
 echo "Selected best candidate metadata: ${SCRIPT_DIR}/${RUNS}/best_run_selection.json"
 echo ""
 echo "=== Forecast plot paths (relative to SCRIPT_DIR above) ==="
-echo "Sweep train output dir: ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/"
-echo "Sweep per-window PNGs:  ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/rolling_window_forecasts/plots/"
-echo "Stitched test HTML (if plotly installed): ${SCRIPT_DIR}/${RUNS}/cfg_288_k11_lr5e4/rolling_window_forecasts/stitched_test_forecast.html"
+echo "Sweep train output dir: ${SCRIPT_DIR}/${RUNS}/${SWEEP_RUN_TAG}/"
+echo "Sweep per-window PNGs:  ${SCRIPT_DIR}/${RUNS}/${SWEEP_RUN_TAG}/rolling_window_forecasts/plots/"
+echo "Stitched test HTML (if plotly installed): ${SCRIPT_DIR}/${RUNS}/${SWEEP_RUN_TAG}/rolling_window_forecasts/stitched_test_forecast.html"
 echo "Best rerun root:        ${SCRIPT_DIR}/${BEST}/"
 echo "(Python also prints 'Output directory' and 'Saved artifacts' with absolute paths in the log.)"
 if command -v find >/dev/null 2>&1; then
