@@ -1,0 +1,11 @@
+# Captured on training host (ngyx@A386345X1309686C) — use this for reproducible train/inference
+# Python 3.10.12
+# Recorded via: python -c "import torch, numpy, pandas; ..."
+
+torch==2.10.0
+# Installed as cu128 wheel on training host:
+#   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+numpy==1.26.4
+pandas==2.3.3
+
+# Install training extras from requirements.txt (matplotlib, plotly, torchvision if needed)
