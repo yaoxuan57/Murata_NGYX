@@ -11,8 +11,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from deployment.io_utils import parse_timestamp_series
-from forecast_sweep_common import compute_timestep_window_start_indices, smooth_target_series_1d
+import _bootstrap  # noqa: F401
+
+from io_utils import parse_timestamp_series
+from model_utils import compute_timestep_window_start_indices, smooth_target_series_1d
 
 
 VALUE_COLUMN = "Acceleration RMS"

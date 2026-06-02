@@ -9,8 +9,10 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from deployment.io_utils import parse_timestamp_series, read_vibration_export_csv
-from deployment.sensors import (
+import _bootstrap  # noqa: F401
+
+from io_utils import parse_timestamp_series, read_vibration_export_csv
+from sensors import (
     AHU_2_9_SENSOR_DESCS,
     normalize_sensor_desc,
     resolve_sensor_list,

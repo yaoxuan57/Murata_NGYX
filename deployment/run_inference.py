@@ -4,6 +4,10 @@ Run transformer inference from a multi-sensor vibration CSV.
 
 One sensor (--sensor) or all default AHU 2-9 sensors (--all-sensors).
 Writes a single JSON file with one top-level key per sensor.
+
+Standalone: run from this folder (no repo root required):
+  cd deployment
+  python run_inference.py --all-sensors -c models
 """
 
 from __future__ import annotations
@@ -12,24 +16,21 @@ import argparse
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+import _bootstrap  # noqa: F401
+from _bootstrap import DEPLOY_ROOT
 
-from deployment.inference import (  # noqa: E402
+from inference import (  # noqa: E402
     run_inference_all_sensors,
     run_inference_payload,
     write_predictions_json,
 )
-from deployment.sensors import AHU_2_9_SENSOR_DESCS  # noqa: E402
+from sensors import AHU_2_9_SENSOR_DESCS  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    default_input = (
-        REPO_ROOT / "deployment" / "data" / "Vibration sensors _ 2022 to 2026.csv"
-    )
-    default_output = REPO_ROOT / "deployment" / "output" / "predictions.json"
-    default_models = REPO_ROOT / "deployment" / "models"
+    default_input = DEPLOY_ROOT / "data" / "Vibration sensors _ 2022 to 2026.csv"
+    default_output = DEPLOY_ROOT / "output" / "predictions.json"
+    default_models = DEPLOY_ROOT / "models"
 
     parser = argparse.ArgumentParser(
         description=(
@@ -39,11 +40,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "All sensors (one JSON, 8 keys; per-sensor .pth in a folder):\n"
-            "  python deployment/run_inference.py --all-sensors -c deployment/models\n\n"
-            "Routing: deployment/models/<stem>.pth where stem is SENSOR_DESC with\n"
+            "  python run_inference.py --all-sensors -c models\n\n"
+            "Routing: models/<stem>.pth where stem is SENSOR_DESC with\n"
             "  spaces to underscores and 2-9 to 2_9 (e.g. AHU_2_9_Blower_DE_A.pth).\n\n"
             "Single sensor:\n"
-            '  python deployment/run_inference.py -s "AHU 2-9 Blower DE A" -c path/to/model.pth\n\n'
+            '  python run_inference.py -s "AHU 2-9 Blower DE A" -c path/to/model.pth\n\n'
             "Sensors in --all-sensors mode:\n  "
             + "\n  ".join(AHU_2_9_SENSOR_DESCS)
         ),
@@ -63,7 +64,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             f"Path to one .pth file (shared by all sensors) or a directory of per-sensor "
             f".pth files (default: {default_models}). "
-            "With --all-sensors, use a directory: deployment/models/AHU_2_9_<name>.pth."
+            "With --all-sensors, use a directory: models/AHU_2_9_<name>.pth."
         ),
     )
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -121,7 +122,7 @@ def main() -> None:
     if args.all_sensors and args.checkpoint.is_file():
         print(
             "Note: --checkpoint is a single file; all sensors will share that model. "
-            "For per-sensor models, pass deployment/models/ as a directory.",
+            "For per-sensor models, pass models/ as a directory.",
             file=sys.stderr,
         )
 

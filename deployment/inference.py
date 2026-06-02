@@ -5,22 +5,34 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 import torch
 
-from deployment.io_utils import parse_timestamp_series, read_vibration_export_csv
-from deployment.sensors import (
+import _bootstrap  # noqa: F401
+
+from io_utils import parse_timestamp_series, prepare_vibration_dataframe, read_vibration_export_csv
+from model_utils import median_quantile_index, smooth_target_series_1d
+from sensors import (
     AHU_2_9_SENSOR_DESCS,
     normalize_sensor_desc,
     resolve_sensor_checkpoint,
     resolve_sensor_list,
 )
-from deployment.windowing import VALUE_COLUMN
-from forecast_sweep_common import median_quantile_index, smooth_target_series_1d
-from train_transformer_sweep import make_model
+from transformer_model import make_model
+from windowing import VALUE_COLUMN
+
+# Multi-sensor table: CSV path or in-memory DataFrame (TIMESTAMP, SENSOR_DESC, Acceleration RMS, …).
+VibrationInput = Union[str, pd.DataFrame]
+
+
+def _load_vibration_frame(input: VibrationInput) -> Tuple[pd.DataFrame, str]:
+    """Return prepared frame and a label for error messages."""
+    if isinstance(input, pd.DataFrame):
+        return prepare_vibration_dataframe(input), "input DataFrame"
+    return read_vibration_export_csv(input), input
 
 
 class InferenceValidationError(Exception):
@@ -33,22 +45,25 @@ class InferenceValidationError(Exception):
 
 
 def load_sensor_context_rows(
-    input_csv: str,
+    input: VibrationInput,
     sensor_desc: str,
     context_len: int,
     value_column: str = VALUE_COLUMN,
 ) -> Tuple[pd.DataFrame, pd.Series]:
-    """Filter one sensor and return exactly *context_len* latest rows + parsed timestamps."""
+    """Filter one sensor and return exactly *context_len* latest rows + parsed timestamps.
+
+    *input* may be a CSV path or a multi-sensor DataFrame (same columns as the export CSV).
+    """
     canon = normalize_sensor_desc(sensor_desc)
     resolve_sensor_list([canon])
 
-    df = read_vibration_export_csv(input_csv)
+    df, source = _load_vibration_frame(input)
     df["SENSOR_DESC"] = df["SENSOR_DESC"].map(normalize_sensor_desc)
     part = df[df["SENSOR_DESC"] == canon].copy()
     if part.empty:
         raise InferenceValidationError(
             canon,
-            f"No rows found for SENSOR_DESC={canon!r} in {input_csv}.",
+            f"No rows found for SENSOR_DESC={canon!r} in {source}.",
         )
 
     ts = parse_timestamp_series(part["TIMESTAMP"], name="TIMESTAMP", strict=False)
@@ -224,7 +239,7 @@ def failure_payload(sensor_desc: str, message: str) -> Dict[str, Any]:
 
 
 def _inference_body_for_sensor(
-    input_csv: str,
+    input: VibrationInput,
     sensor_desc: str,
     model: torch.nn.Module,
     ckpt: dict,
@@ -239,7 +254,7 @@ def _inference_body_for_sensor(
     input_len = int(ckpt["input_len"])
     pred_len = int(ckpt["pred_len"])
 
-    df, ts = load_sensor_context_rows(input_csv, canon, context_len=input_len)
+    df, ts = load_sensor_context_rows(input, canon, context_len=input_len)
 
     gap_err = validate_timestamp_continuity(ts, max_gap_seconds)
     if gap_err is not None:
@@ -283,7 +298,7 @@ def _inference_body_for_sensor(
 
 
 def run_inference_payload(
-    input_csv: str,
+    input: VibrationInput,
     checkpoint: str,
     sensor_desc: str,
     *,
@@ -294,6 +309,9 @@ def run_inference_payload(
     """
     Take exactly ``input_len`` rows (from checkpoint, usually 288) as one context window.
 
+    *input* is a CSV path or a multi-sensor DataFrame with ``TIMESTAMP``, ``SENSOR_DESC``,
+    and ``Acceleration RMS`` (or the column used at training time).
+
     *checkpoint* may be a single ``.pth`` file or a directory (per-sensor routing).
 
     Returns a one-key dict: ``{ "<SENSOR_DESC>": { ... } }`` (success or failure body).
@@ -303,7 +321,7 @@ def run_inference_payload(
         ckpt_path = resolve_sensor_checkpoint(checkpoint, canon)
         model, ckpt, args = load_checkpoint(str(ckpt_path), device)
         body = _inference_body_for_sensor(
-            input_csv,
+            input,
             canon,
             model,
             ckpt,
@@ -321,7 +339,7 @@ def run_inference_payload(
 
 
 def run_inference_all_sensors(
-    input_csv: str,
+    input: VibrationInput,
     checkpoint: str,
     sensor_descs: Optional[List[str]] = None,
     *,
@@ -332,7 +350,9 @@ def run_inference_all_sensors(
     """
     Run inference for every listed sensor; merge into one JSON object (multiple top-level keys).
 
-    *checkpoint* should be ``deployment/models/`` (one ``<stem>.pth`` per sensor).
+    *input* is a CSV path or a multi-sensor DataFrame (same schema as the vibration export).
+
+    *checkpoint* should be ``models/`` (one ``<stem>.pth`` per sensor).
     If it is a single ``.pth`` file, that same weights file is used for all sensors.
 
     Failed sensors are included with ``"success": false`` and ``"error"``; others get forecasts.
@@ -350,7 +370,7 @@ def run_inference_all_sensors(
             print(f"Running inference: {canon}  ->  {ckpt_path.name}")
             model, ckpt, args = load_checkpoint(str(ckpt_path), device)
             body = _inference_body_for_sensor(
-                input_csv,
+                input,
                 canon,
                 model,
                 ckpt,

@@ -37,14 +37,19 @@ def parse_timestamp_series(
     return parsed
 
 
-def read_vibration_export_csv(path: str) -> pd.DataFrame:
-    """Load a multi-sensor vibration export CSV."""
-    df = pd.read_csv(path, low_memory=False)
+def prepare_vibration_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Validate and normalize columns for inference / preprocessing."""
     required = {"TIMESTAMP", "SENSOR_DESC"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"CSV missing required columns: {sorted(missing)}")
-    if "STN_CODE" in df.columns:
-        df["STN_CODE"] = df["STN_CODE"].astype(str)
-    df["SENSOR_DESC"] = df["SENSOR_DESC"].astype(str).str.strip()
-    return df
+        raise ValueError(f"DataFrame missing required columns: {sorted(missing)}")
+    out = df.copy()
+    if "STN_CODE" in out.columns:
+        out["STN_CODE"] = out["STN_CODE"].astype(str)
+    out["SENSOR_DESC"] = out["SENSOR_DESC"].astype(str).str.strip()
+    return out
+
+
+def read_vibration_export_csv(path: str) -> pd.DataFrame:
+    """Load a multi-sensor vibration export CSV."""
+    return prepare_vibration_dataframe(pd.read_csv(path, low_memory=False))

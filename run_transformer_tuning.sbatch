@@ -17,19 +17,19 @@ mkdir -p ~/logs
 
 # --- Timestamp / window rules (see forecast_sweep_common.compute_timestep_window_start_indices) ---
 # Max gap: every consecutive row-to-row Δt inside a window must be ≤ this (seconds). Any shorter cadence is OK.
-MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS:-3600}
+MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS:-1860}
 # Nominal cadence (optional): set REQUIRE_UNIFORM_TIMESTEP=1 to also require each step ≈ UNIFORM_STEP_SECONDS ± UNIFORM_TOL_SECONDS.
 # Default 0 = do NOT use nominal spacing; only the max-gap rule above filters windows.
-REQUIRE_UNIFORM_TIMESTEP=${REQUIRE_UNIFORM_TIMESTEP:-0}
-UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-300}
-UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-30}
+REQUIRE_UNIFORM_TIMESTEP=${REQUIRE_UNIFORM_TIMESTEP:-1}
+UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-1800}
+UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-60}
 if [ "${REQUIRE_UNIFORM_TIMESTEP}" = "1" ]; then
   _UNIFORM_FLAGS="--require-uniform-timestep --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
 else
   _UNIFORM_FLAGS="--no-require-uniform-timestep"
 fi
 # No post-smoothing on forecast horizons (--pred-smoothing-window 1).
-COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 50 --min-delta 1e-6 --scheduler-patience 6 --pred-lens 288 --pred-smoothing-window 1 ${_UNIFORM_FLAGS} --max-consecutive-timestamp-gap-seconds ${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
+COMMON_TRAIN="--epochs 500 --batch-size 16 --early-stopping-patience 50 --min-delta 1e-6 --scheduler-patience 6 --pred-lens 48 --pred-smoothing-window 1 ${_UNIFORM_FLAGS} --max-consecutive-timestamp-gap-seconds ${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
 # Tail loss weight: 1.0 = flat (default; prevents tail spikes). Pass LOSS_TAIL_WEIGHT=0.8 to restore the old decay.
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
@@ -73,14 +73,14 @@ else
   echo "Stitched test HTML: off."
 fi
 
-# Pre-split smoothing on --value-column (same as run_dlinear_tuning.sbatch / run_arima_tuning.sbatch): centered MA per CSV before windows.
+# Pre-split smoothing on --value-column: causal (trailing) MA per CSV before windows (window length = TARGET_SMOOTHING_WINDOW).
 # Rolling-window PNGs plot that same smoothed value history and smoothed horizons (actual); predictions are raw model outputs unless --pred-smoothing-window>1 is set in train args.
 # Example: sbatch --export=ALL,TARGET_SMOOTHING_WINDOW=7 run_transformer_tuning.sbatch
-TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW:-200}
+TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW:-48}
 TARGET_SMOOTH_FLAGS=()
 if [ "${TARGET_SMOOTHING_WINDOW}" -gt 1 ] 2>/dev/null; then
   TARGET_SMOOTH_FLAGS=(--target-smoothing-window "${TARGET_SMOOTHING_WINDOW}")
-  echo "Pre-split target smoothing: window=${TARGET_SMOOTHING_WINDOW} (centered MA on value column per CSV)."
+  echo "Pre-split target smoothing: window=${TARGET_SMOOTHING_WINDOW} (causal trailing MA on value column per CSV)."
 else
   echo "Pre-split target smoothing: off (TARGET_SMOOTHING_WINDOW=${TARGET_SMOOTHING_WINDOW})."
 fi
@@ -213,10 +213,10 @@ mkdir -p "${RUNS}" "${BEST}"
 
 echo "Output directory root: ${ROOT}"
 
-SWEEP_RUN_TAG="cfg_288_k11_lr5e4_wd${WEIGHT_DECAY}"
+SWEEP_RUN_TAG="cfg_48_k11_lr5e4_wd${WEIGHT_DECAY}"
 
 # 1) Run candidate configs and save window plots for each candidate.
-python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${COMMON_QUANT[@]}" "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${STITCH_HTML_FLAGS[@]}" "${COMMON_ROLLING[@]}" --input-lens 288 --lr 5e-4 --weight-decay "${WEIGHT_DECAY}" --output-dir "${RUNS}/${SWEEP_RUN_TAG}"
+python -u ${TRAIN_SCRIPT} ${COMMON_TRAIN} ${COMMON_LOSS} "${COMMON_QUANT[@]}" "${TARGET_SMOOTH_FLAGS[@]}" --value-column "${TARGET_COLUMN}" "${FEATURE_FLAGS[@]}" ${DATA_FLAGS} --save-window-plots "${STITCH_HTML_FLAGS[@]}" "${COMMON_ROLLING[@]}" --input-lens 48 --lr 5e-4 --weight-decay "${WEIGHT_DECAY}" --output-dir "${RUNS}/${SWEEP_RUN_TAG}"
  
 # 2) Rank all candidate runs and store best config summary.
 python -u select_best_sweep_run.py --runs-root "${RUNS}" --out-json "best_run_selection.json"

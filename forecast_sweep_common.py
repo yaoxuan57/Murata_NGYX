@@ -151,9 +151,9 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         type=int,
         default=1,
         metavar="K",
-        help="If K>1, apply a centered length-K moving average to --value-column in each loaded CSV "
-        "before building train/val/test windows (per file only; other feature columns unchanged). "
-        "K is bumped to odd if even. K=1 disables.",
+        help="If K>1, apply a causal (trailing) length-K moving average to --value-column in each "
+        "loaded CSV before building train/val/test windows (per file only; other feature columns "
+        "unchanged). K=1 disables.",
     )
     parser.add_argument("--save-window-plots", dest="save_window_plots", action="store_true")
     parser.add_argument("--no-window-plots", dest="save_window_plots", action="store_false")
@@ -317,15 +317,20 @@ def smooth_forecast_vector(vec: np.ndarray, window: int) -> np.ndarray:
 
 
 def smooth_target_series_1d(vec: np.ndarray, window: int) -> np.ndarray:
-    """Centered MA on a 1D target series (full CSV column) before sliding windows; edge padding."""
+    """Causal (trailing) MA on a 1D target series; window length W, min_periods=1 at the start."""
     if window <= 1:
         return np.asarray(vec, dtype=np.float32)
-    w = window if window % 2 == 1 else window + 1
-    pad = w // 2
+    w = int(window)
     y = np.asarray(vec, dtype=np.float64)
-    kernel = np.ones(w, dtype=np.float64) / w
-    y_pad = np.pad(y, (pad, pad), mode="edge")
-    return np.convolve(y_pad, kernel, mode="valid").astype(np.float32)
+    n = len(y)
+    if n == 0:
+        return np.asarray(y, dtype=np.float32)
+    csum = np.concatenate(([0.0], np.cumsum(y)))
+    idx = np.arange(n, dtype=np.int64)
+    start = np.maximum(0, idx - w + 1)
+    counts = (idx - start + 1).astype(np.float64)
+    out = (csum[idx + 1] - csum[start]) / counts
+    return out.astype(np.float32)
 
 
 def r2_np(y_true, y_pred):
@@ -1765,9 +1770,9 @@ def run_sweep(
 
     tw_pre = int(getattr(args, "target_smoothing_window", 1))
     if tw_pre > 1:
-        w_pre = tw_pre if tw_pre % 2 == 1 else tw_pre + 1
+        w_pre = tw_pre
         print(
-            f"Target pre-smoothing: centered MA window={w_pre} on {vc!r} "
+            f"Target pre-smoothing: causal (trailing) MA window={w_pre} on {vc!r} "
             "(per CSV, applied before train/val/test windows)."
         )
 

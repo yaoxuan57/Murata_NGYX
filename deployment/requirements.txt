@@ -2,8 +2,7 @@
 #
 # Why only 3 packages listed?
 #   deployment/run_inference.py imports ONLY: torch, numpy, pandas
-#   (+ this repo's Python files: inference.py, sensors.py, forecast_sweep_common.py,
-#      train_transformer_sweep.py — not installable via pip)
+#   All Python code lives in this folder (inference.py, transformer_model.py, model_utils.py, …)
 #   torch pulls in its own dependencies (filelock, sympy, networkx, etc.) automatically.
 #   matplotlib / plotly are for TRAINING plots only — not needed to run inference.
 #
@@ -16,8 +15,8 @@
 # or the exact remote pins:
 #   pip install -r requirements-lock-remote.txt
 #
-# Run from repo root (default CSV: deployment/data/Vibration sensors _ 2022 to 2026.csv):
-#   python deployment/run_inference.py --all-sensors -c deployment/models
+# Run from this folder (default CSV: data/Vibration sensors _ 2022 to 2026.csv):
+#   cd deployment && python run_inference.py --all-sensors -c models
 
 torch==2.10.0
 numpy==1.26.4
