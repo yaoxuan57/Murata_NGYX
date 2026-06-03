@@ -116,7 +116,9 @@ fi
 #   2) Or split offline: python split_csv_chronological_train_val_test.py -i data/your.csv -o data/splits/my_run
 #      then: sbatch --export=ALL,SPLIT_OUT_DIR=data/splits/my_run,SINGLE_CSV= run_transformer_tuning.sbatch
 #      (SINGLE_CSV must be empty when using SPLIT_OUT_DIR or three explicit CSV paths.)
-SPLIT_SOURCE_CSV=${SPLIT_SOURCE_CSV:-data/AHU_2_9_Blower_DE_A.csv}
+# Option B (30 min cadence): use data_30mins_frequency/*_30_min.csv with REQUIRE_UNIFORM_TIMESTEP=1 (default).
+# Per sensor: sbatch --export=ALL,SPLIT_SOURCE_CSV=data_30mins_frequency/AHU_2_9_Blower_NDE_V_30_min.csv ...
+SPLIT_SOURCE_CSV=${SPLIT_SOURCE_CSV:-data_30mins_frequency/AHU_2_9_Blower_DE_A_30_min.csv}
 SPLIT_OUT_DIR=${SPLIT_OUT_DIR:-}
 CHRONO_TRAIN_RATIO=${CHRONO_TRAIN_RATIO:-0.6}
 CHRONO_VAL_RATIO=${CHRONO_VAL_RATIO:-0.2}

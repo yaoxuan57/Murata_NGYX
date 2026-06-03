@@ -18,25 +18,28 @@ class DLinearForecaster(nn.Module):
         residual_hidden=128,
         residual_dropout=0.1,
         residual_weight=0.25,
+        n_quantiles: int = 1,
     ):
         super().__init__()
         self.input_len = input_len
         self.pred_len = pred_len
+        self.n_quantiles = int(n_quantiles)
         self.input_dim = input_dim
         self.kernel_size = kernel_size if kernel_size % 2 == 1 else kernel_size + 1
         self.use_residual_head = use_residual_head
         self.residual_weight = residual_weight
         self.channel_mixer = nn.Conv1d(input_dim, 1, kernel_size=1, bias=False)
 
-        self.linear_trend = nn.Linear(input_len, pred_len)
-        self.linear_seasonal = nn.Linear(input_len, pred_len)
+        out_dim = pred_len * self.n_quantiles if self.n_quantiles > 1 else pred_len
+        self.linear_trend = nn.Linear(input_len, out_dim)
+        self.linear_seasonal = nn.Linear(input_len, out_dim)
 
         if self.use_residual_head:
             self.residual_head = nn.Sequential(
                 nn.Linear(input_len, residual_hidden),
                 nn.GELU(),
                 nn.Dropout(residual_dropout),
-                nn.Linear(residual_hidden, pred_len),
+                nn.Linear(residual_hidden, out_dim),
             )
         else:
             self.residual_head = None
@@ -63,10 +66,17 @@ class DLinearForecaster(nn.Module):
         out = trend_out + seasonal_out
         if self.residual_head is not None:
             out = out + self.residual_weight * self.residual_head(seq)
-        return out
+        if self.n_quantiles <= 1:
+            return out
+        b = out.size(0)
+        z = out.view(b, self.n_quantiles, self.pred_len)
+        z0 = z[:, 0, :]
+        inc = F.softplus(z[:, 1:, :] - z[:, :-1, :])
+        return torch.cat([z0.unsqueeze(1), z0.unsqueeze(1) + torch.cumsum(inc, dim=1)], dim=1)
 
 
 def make_model(input_len, pred_len, args, device):
+    n_q = len(args.forecast_quantiles) if getattr(args, "forecast_quantiles", None) else 1
     return DLinearForecaster(
         input_len=input_len,
         pred_len=pred_len,
@@ -76,10 +86,13 @@ def make_model(input_len, pred_len, args, device):
         residual_hidden=args.residual_hidden,
         residual_dropout=args.residual_dropout,
         residual_weight=args.residual_weight,
+        n_quantiles=n_q,
     ).to(device)
 
 
 def make_model_config(args, input_len, pred_len):
+    fq = getattr(args, "forecast_quantiles", None)
+    n_q = len(fq) if fq else 1
     return {
         "model_type": "dlinear",
         "input_len": input_len,
@@ -90,6 +103,8 @@ def make_model_config(args, input_len, pred_len):
         "residual_hidden": args.residual_hidden,
         "residual_dropout": args.residual_dropout,
         "residual_weight": args.residual_weight,
+        "n_quantiles": n_q,
+        "forecast_quantiles": list(fq) if fq else None,
     }
 
 

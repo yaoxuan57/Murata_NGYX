@@ -243,7 +243,7 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         default=None,
         metavar="Q",
         help="If set (e.g. 0.05 0.5 0.95), train pinball (quantile) loss per horizon step. "
-        "Requires a model that returns (batch, n_quantiles, pred_len), e.g. train_transformer_sweep. "
+        "Requires a model that returns (batch, n_quantiles, pred_len), e.g. train_transformer_sweep or train_dlinear_sweep. "
         "Median slice is used for RMSE / trajectory metrics; CSVs include one column per quantile.",
     )
     return parser
@@ -2166,7 +2166,8 @@ def run_sweep(
                     if pr.dim() != 3 or pr.shape[1] != len(fq):
                         raise ValueError(
                             f"--forecast-quantiles requires model output (batch, Q={len(fq)}, pred_len); "
-                            f"got shape {tuple(pr.shape)}. Use train_transformer_sweep.py with the quantile head."
+                            f"got shape {tuple(pr.shape)}. Use a model with a quantile head "
+                            "(e.g. train_transformer_sweep.py or train_dlinear_sweep.py)."
                         )
                     criterion = QuantileForecastLoss(
                         pred_len,

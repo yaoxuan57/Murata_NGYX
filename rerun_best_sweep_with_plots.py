@@ -14,7 +14,12 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--early-stopping-patience", type=int, default=50)
     parser.add_argument("--scheduler-patience", type=int, default=6)
-    parser.add_argument("--pred-lens", type=int, default=288)
+    parser.add_argument(
+        "--pred-lens",
+        type=int,
+        default=None,
+        help="Override; default uses pred_len from selection JSON.",
+    )
     parser.add_argument("--loss-point-weight", type=float, default=0.7)
     parser.add_argument("--loss-diff-weight", type=float, default=0.9)
     parser.add_argument("--loss-curvature-weight", type=float, default=0.5)
@@ -101,7 +106,9 @@ def parse_args():
         help="Pass --save-stitched-test-html to the train script (Plotly stitched test HTML). "
         "Also enabled when best_config.save_stitched_test_html is true.",
     )
-    return parser.parse_args()
+    args, train_extra = parser.parse_known_args()
+    args.train_extra_args = train_extra
+    return args
 
 
 def append_optional(cmd, flag, value):
@@ -113,7 +120,7 @@ def model_config_to_flags(model_config, train_script: str):
     """Map saved model_config to CLI flags; omit keys the target train script does not define."""
     args = []
     # input_dim is resolved from --feature-columns / CSV at train time, not a train_*_sweep CLI flag.
-    skip = {"model_type", "input_len", "pred_len", "input_dim"}
+    skip = {"model_type", "input_len", "pred_len", "input_dim", "n_quantiles", "forecast_quantiles"}
     mtype = (model_config or {}).get("model_type")
     script = os.path.basename(train_script).lower()
     is_transformer = mtype == "transformer" or (mtype is None and "transformer" in script)
@@ -163,6 +170,14 @@ def main():
 
     run_name = best["run_name"]
     input_len = int(best["input_len"])
+    pred_len = args.pred_lens
+    if pred_len is None:
+        pred_len = best.get("pred_len")
+    if pred_len is None:
+        pred_len = best.get("best_config", {}).get("best_pred_len")
+    if pred_len is None:
+        pred_len = 288
+    pred_len = int(pred_len)
     model_config = best.get("model_config", {})
     best_config = best.get("best_config", {})
     supports_save_window_plots = bool(best_config.get("supports_save_window_plots", True))
@@ -186,7 +201,7 @@ def main():
         "--scheduler-patience",
         str(args.scheduler_patience),
         "--pred-lens",
-        str(args.pred_lens),
+        str(pred_len),
         "--input-lens",
         str(input_len),
     ]
@@ -333,6 +348,8 @@ def main():
     if target_smooth is not None:
         cmd.extend(["--target-smoothing-window", str(int(target_smooth))])
     cmd.extend(model_config_to_flags(model_config, args.train_script))
+    if args.train_extra_args:
+        cmd.extend(args.train_extra_args)
     cmd.extend(["--output-dir", out_dir])
 
     print("Re-running best config with window plots:")
