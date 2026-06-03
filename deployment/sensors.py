@@ -70,13 +70,19 @@ def resolve_sensor_checkpoint(
     if base.is_file():
         return base.resolve()
     if base.is_dir():
-        path = base / f"{checkpoint_stem_for_sensor(canon)}.pth"
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"No checkpoint for sensor {canon!r}: expected {path}. "
-                f"Stems: {[checkpoint_stem_for_sensor(s) for s in AHU_2_9_SENSOR_DESCS]}."
-            )
-        return path.resolve()
+        stem = checkpoint_stem_for_sensor(canon)
+        candidates = [
+            base / f"{stem}_v2.pth",
+            base / f"{stem}.pth",
+        ]
+        for path in candidates:
+            if path.is_file():
+                return path.resolve()
+        raise FileNotFoundError(
+            f"No checkpoint for sensor {canon!r}: tried "
+            + ", ".join(str(p) for p in candidates)
+            + f". Stems: {[checkpoint_stem_for_sensor(s) for s in AHU_2_9_SENSOR_DESCS]}."
+        )
     raise FileNotFoundError(f"Checkpoint path not found: {checkpoint}")
 
 

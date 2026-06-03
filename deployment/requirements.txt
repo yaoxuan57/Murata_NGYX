@@ -21,3 +21,6 @@
 torch==2.10.0
 numpy==1.26.4
 pandas==2.3.3
+
+# Optional: forecast plots (--plot on run_inference.py or run_plot_predictions.py)
+matplotlib>=3.8,<3.11

@@ -28,14 +28,15 @@ from sensors import AHU_2_9_SENSOR_DESCS  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    default_input = DEPLOY_ROOT / "data" / "Vibration sensors _ 2022 to 2026.csv"
+    default_input = DEPLOY_ROOT / "data" / "vibration_May.csv"
     default_output = DEPLOY_ROOT / "output" / "predictions.json"
     default_models = DEPLOY_ROOT / "models"
 
     parser = argparse.ArgumentParser(
         description=(
-            "Filter SENSOR_DESC from a multi-sensor CSV, take 288 latest rows, "
-            "validate <=60 min gaps, smooth RMS (200), predict 288 steps."
+            "Filter SENSOR_DESC from a multi-sensor CSV, take input_len latest rows "
+            "(48 for current models), validate <=10 h gaps, causal smooth RMS (48), "
+            "predict pred_len steps (48)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -86,8 +87,24 @@ def parse_args() -> argparse.Namespace:
         default=default_output,
         help=f"Predictions JSON path (default: {default_output})",
     )
-    parser.add_argument("--smooth-window", type=int, default=200)
-    parser.add_argument("--max-gap-minutes", type=float, default=60.0)
+    parser.add_argument(
+        "--smooth-window",
+        type=int,
+        default=48,
+        help="Causal (trailing) MA window on Acceleration RMS (match training TARGET_SMOOTHING_WINDOW).",
+    )
+    parser.add_argument(
+        "--max-gap-minutes",
+        type=float,
+        default=600.0,
+        help="Max allowed gap between consecutive context timestamps in minutes (default 600 = 10 h).",
+    )
+    parser.add_argument(
+        "--forecast-step-minutes",
+        type=float,
+        default=30.0,
+        help="Minutes between each forecast timestamp in JSON output (30-min cadence).",
+    )
     parser.add_argument(
         "--device",
         type=str,
@@ -98,6 +115,23 @@ def parse_args() -> argparse.Namespace:
         "--fail-if-any-sensor-fails",
         action="store_true",
         help="Exit code 1 if any sensor failed (default: still write JSON with per-sensor errors).",
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="After writing JSON, save per-sensor forecast PNGs (median + quantile band) under output/plots/.",
+    )
+    parser.add_argument(
+        "--plots-dir",
+        type=Path,
+        default=None,
+        help="Plot output directory (default: <output>/plots).",
+    )
+    parser.add_argument(
+        "--plot-history-before",
+        type=int,
+        default=100,
+        help="When using --plot: extra CSV points shown before the model input window (0=off).",
     )
     return parser.parse_args()
 
@@ -134,6 +168,7 @@ def main() -> None:
     kw = dict(
         smooth_window=args.smooth_window,
         max_gap_seconds=float(args.max_gap_minutes) * 60.0,
+        forecast_step_minutes=float(args.forecast_step_minutes),
         device=device,
     )
 
@@ -166,6 +201,29 @@ def main() -> None:
                 q = body.get("forecast_quantiles")
                 extra = f" quantiles={q}" if q else ""
                 print(f"  - {name}: OK{extra}")
+
+    if args.plot:
+        try:
+            from plot_predictions import plot_all_sensors_from_json, plot_combined_overview
+        except ImportError as exc:
+            raise SystemExit(
+                "Plotting requires matplotlib: pip install matplotlib"
+            ) from exc
+        plots_dir = args.plots_dir or (args.output.parent / "plots")
+        print(f"\nPlots -> {plots_dir}")
+        n_ok, n_skip, reasons = plot_all_sensors_from_json(
+            args.output,
+            plots_dir,
+            input_csv=args.input if args.input.is_file() else None,
+            models_dir=args.checkpoint if args.checkpoint.is_dir() else None,
+            smooth_window=args.smooth_window,
+            max_gap_seconds=float(args.max_gap_minutes) * 60.0,
+            history_before=args.plot_history_before,
+        )
+        plot_combined_overview(args.output, plots_dir / "_all_sensors_overview.png")
+        print(f"  plotted: {n_ok}  skipped: {n_skip}")
+        for r in reasons:
+            print(f"    - {r}")
 
     if fail and (args.fail_if_any_sensor_fails or (not args.all_sensors)):
         raise SystemExit(1)

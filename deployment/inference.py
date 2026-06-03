@@ -91,6 +91,18 @@ def load_sensor_context_rows(
     return part.drop(columns=["_ts"]), ts_out
 
 
+def load_sensor_tail_rows(
+    input: VibrationInput,
+    sensor_desc: str,
+    n_rows: int,
+    value_column: str = VALUE_COLUMN,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """Like :func:`load_sensor_context_rows` but returns the latest *n_rows* rows."""
+    if n_rows <= 0:
+        raise ValueError("n_rows must be positive.")
+    return load_sensor_context_rows(input, sensor_desc, context_len=n_rows, value_column=value_column)
+
+
 def validate_timestamp_continuity(
     ts: pd.Series,
     max_gap_seconds: float,
@@ -121,10 +133,10 @@ def build_smoothed_single_context(
     df: pd.DataFrame,
     ts: pd.Series,
     *,
-    smooth_window: int = 200,
+    smooth_window: int = 48,
     value_column: str = VALUE_COLUMN,
 ) -> np.ndarray:
-    """Smooth exactly len(df) RMS values; shape (context_len,)."""
+    """Causal (trailing) smooth on exactly len(df) RMS values; shape (context_len,)."""
     rms_raw = pd.to_numeric(df[value_column], errors="coerce").to_numpy(dtype=np.float64)
     if np.isnan(rms_raw).any():
         raise InferenceValidationError(
@@ -141,9 +153,9 @@ def forecast_timestamps_after_context(
     ts: pd.Series,
     pred_len: int,
     *,
-    step_minutes: float = 5.0,
+    step_minutes: float = 30.0,
 ) -> List[str]:
-    """Extrapolate *pred_len* future timestamps: last context time + 5 min per forecast step."""
+    """Extrapolate *pred_len* future timestamps: last context time + step_minutes per step."""
     last = pd.Timestamp(ts.iloc[-1])
     step = pd.Timedelta(minutes=step_minutes)
     stamps: List[str] = []
@@ -247,6 +259,7 @@ def _inference_body_for_sensor(
     *,
     smooth_window: int,
     max_gap_seconds: float,
+    forecast_step_minutes: float,
     device: str,
 ) -> Dict[str, Any]:
     """Run inference for one sensor; raises InferenceValidationError on failure."""
@@ -287,8 +300,15 @@ def _inference_body_for_sensor(
             f"Model returned {len(pred_list)} steps; expected {pred_len}.",
         )
 
+    ctx_ts = parse_timestamp_series(df["TIMESTAMP"], name="TIMESTAMP")
     body: Dict[str, Any] = {
-        "timestamps": forecast_timestamps_after_context(ts, pred_len),
+        "context_timestamps": [pd.Timestamp(t).isoformat() for t in ctx_ts.tolist()],
+        "context_values": [float(v) for v in context_smooth],
+        "timestamps": forecast_timestamps_after_context(
+            ts,
+            pred_len,
+            step_minutes=forecast_step_minutes,
+        ),
         "predicted": pred_list,
     }
     if "quantiles" in forecast:
@@ -302,12 +322,13 @@ def run_inference_payload(
     checkpoint: str,
     sensor_desc: str,
     *,
-    smooth_window: int = 200,
-    max_gap_seconds: float = 3600.0,
+    smooth_window: int = 48,
+    max_gap_seconds: float = 36000.0,
+    forecast_step_minutes: float = 30.0,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
-    Take exactly ``input_len`` rows (from checkpoint, usually 288) as one context window.
+    Take exactly ``input_len`` rows from the checkpoint (48 for current models) as context.
 
     *input* is a CSV path or a multi-sensor DataFrame with ``TIMESTAMP``, ``SENSOR_DESC``,
     and ``Acceleration RMS`` (or the column used at training time).
@@ -328,6 +349,7 @@ def run_inference_payload(
             args,
             smooth_window=smooth_window,
             max_gap_seconds=max_gap_seconds,
+            forecast_step_minutes=forecast_step_minutes,
             device=device,
         )
         body["checkpoint"] = str(ckpt_path)
@@ -343,8 +365,9 @@ def run_inference_all_sensors(
     checkpoint: str,
     sensor_descs: Optional[List[str]] = None,
     *,
-    smooth_window: int = 200,
-    max_gap_seconds: float = 3600.0,
+    smooth_window: int = 48,
+    max_gap_seconds: float = 36000.0,
+    forecast_step_minutes: float = 30.0,
     device: str = "cpu",
 ) -> Dict[str, Any]:
     """
@@ -377,6 +400,7 @@ def run_inference_all_sensors(
                 args,
                 smooth_window=smooth_window,
                 max_gap_seconds=max_gap_seconds,
+                forecast_step_minutes=forecast_step_minutes,
                 device=device,
             )
             body["checkpoint"] = str(ckpt_path)
