@@ -89,16 +89,30 @@ if [ -n "${ROLLING_WINDOW_ARTIFACT_LIMIT}" ] && [ "${ROLLING_WINDOW_ARTIFACT_LIM
   COMMON_ROLLING=(--rolling-window-artifact-limit "${ROLLING_WINDOW_ARTIFACT_LIMIT}")
 fi
 
-# --- Repo root (same rules as run_transformer_tuning.sbatch) ---
+# --- Repo root (must contain train_transformer_sweep.py at top level) ---
+# If you submit from finetune/ (cd finetune && sbatch ...), SLURM_SUBMIT_DIR is wrong unless we fix it.
+_FINETUNE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_DEFAULT_REPO="$(cd "${_FINETUNE_DIR}/.." && pwd)"
+
 REPO_ROOT=${REPO_ROOT:-}
 if [ -n "${REPO_ROOT}" ]; then
   SCRIPT_DIR="${REPO_ROOT}"
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "${SLURM_SUBMIT_DIR}/train_transformer_sweep.py" ]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+elif [ -f "${_DEFAULT_REPO}/train_transformer_sweep.py" ]; then
+  SCRIPT_DIR="${_DEFAULT_REPO}"
 elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
   SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
 else
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  SCRIPT_DIR="${_DEFAULT_REPO}"
 fi
 cd "${SCRIPT_DIR}" || { echo "ERROR: cannot cd to SCRIPT_DIR=${SCRIPT_DIR}" >&2; exit 1; }
+if [ ! -f "${SCRIPT_DIR}/train_transformer_sweep.py" ]; then
+  echo "ERROR: ${SCRIPT_DIR}/train_transformer_sweep.py not found." >&2
+  echo "Submit from repo root:  cd .../Murata_NGYX && sbatch finetune/run_transformer_finetune.sbatch" >&2
+  echo "Or set:  sbatch --export=ALL,REPO_ROOT=/path/to/Murata_NGYX finetune/run_transformer_finetune.sbatch" >&2
+  exit 1
+fi
 echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
 
 # --- Finetune CSVs (from build_finetune_splits.ipynb) ---
@@ -140,7 +154,7 @@ ROOT="finetune/outputs_transformer_finetune_${DATA_TAG}${JOB_SUFFIX}"
 mkdir -p "${ROOT}"
 echo "Output directory: ${SCRIPT_DIR}/${ROOT}"
 
-python -u train_transformer_sweep.py \
+python -u "${SCRIPT_DIR}/train_transformer_sweep.py" \
   ${COMMON_TRAIN} \
   ${COMMON_LOSS} \
   "${COMMON_QUANT[@]}" \
