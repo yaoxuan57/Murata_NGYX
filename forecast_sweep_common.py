@@ -117,6 +117,14 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     parser.add_argument("--min-delta", type=float, default=1e-6)
     parser.add_argument("--plot-sample-idx", type=int, default=200)
     parser.add_argument("--checkpoint-name", type=str, default=default_checkpoint_name)
+    parser.add_argument(
+        "--init-checkpoint",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Optional .pth from a prior run: load model_state_dict before training (optimizer reset). "
+        "Architecture must match --input-lens / --pred-lens. train_mean/train_std are recomputed from the new train CSV.",
+    )
     parser.add_argument("--loss-huber-delta", type=float, default=1.0)
     parser.add_argument("--loss-point-weight", type=float, default=0.2)
     parser.add_argument("--loss-diff-weight", type=float, default=5)
@@ -247,6 +255,39 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         "Median slice is used for RMSE / trajectory metrics; CSVs include one column per quantile.",
     )
     return parser
+
+
+def load_init_checkpoint_weights(
+    model: nn.Module,
+    checkpoint_path: str,
+    device: torch.device,
+    *,
+    input_len: int,
+    pred_len: int,
+) -> None:
+    path = os.path.abspath(checkpoint_path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"init checkpoint not found: {path}")
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    state = ckpt.get("model_state_dict")
+    if state is None:
+        raise ValueError(f"No model_state_dict in {path}")
+    ck_in = int(ckpt.get("input_len", input_len))
+    ck_pr = int(ckpt.get("pred_len", pred_len))
+    if ck_in != int(input_len) or ck_pr != int(pred_len):
+        raise ValueError(
+            f"init checkpoint lens ({ck_in}, {ck_pr}) != training ({input_len}, {pred_len}); "
+            "match --input-lens / --pred-lens to the saved model."
+        )
+    model.load_state_dict(state, strict=True)
+    prev_mean = ckpt.get("train_mean")
+    prev_std = ckpt.get("train_std")
+    print(f"Loaded init weights from {path}")
+    if prev_mean is not None and prev_std is not None:
+        print(
+            f"  (checkpoint normalization: mean={float(prev_mean):.6f}, std={float(prev_std):.6f}; "
+            "new train CSV stats will be used for this run.)"
+        )
 
 
 def set_seed(seed):
@@ -2155,6 +2196,14 @@ def run_sweep(
                     fq = None
 
                 model = model_factory(input_len, pred_len, args, device)
+                if getattr(args, "init_checkpoint", None):
+                    load_init_checkpoint_weights(
+                        model,
+                        args.init_checkpoint,
+                        device,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                    )
                 if fq is not None:
                     if len(fq) < 2:
                         raise ValueError(
