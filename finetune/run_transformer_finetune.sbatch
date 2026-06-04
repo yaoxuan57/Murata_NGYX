@@ -28,14 +28,17 @@
 #
 # Optional overrides:
 #   FINETUNE_LR=1e-5  FINETUNE_EPOCHS=80  EARLY_STOPPING_PATIENCE=15
+#   REQUIRE_UNIFORM_TIMESTEP=1  (match full tuning; may drop val/test to 0 windows on short May splits)
 
 set -euo pipefail
 
 mkdir -p ~/logs
 
-# --- Match run_transformer_tuning.sbatch window / cadence rules ---
+# --- Window rules (finetune defaults differ from full tuning) ---
+# May val/test are only ~177 rows each; strict 1800±60s on every step in a 96-row window
+# often yields 0 val/test windows (gaps in May). Default: max-gap only; optional strict uniform.
 MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS:-1860}
-REQUIRE_UNIFORM_TIMESTEP=${REQUIRE_UNIFORM_TIMESTEP:-1}
+REQUIRE_UNIFORM_TIMESTEP=${REQUIRE_UNIFORM_TIMESTEP:-0}
 UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-1800}
 UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-60}
 if [ "${REQUIRE_UNIFORM_TIMESTEP}" = "1" ]; then

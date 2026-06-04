@@ -813,7 +813,10 @@ class MultiStepDeltaDataset(Dataset):
             if self.sample_starts.ndim != 1:
                 raise ValueError("sample_starts must be a 1D array of row indices.")
             if self.sample_starts.size == 0:
-                raise ValueError("No valid training windows (uniform timestep or length).")
+                raise ValueError(
+                    "No valid windows for this split (series too short or no window passes "
+                    "timestep filters; try --no-require-uniform-timestep or larger val/test CSV)."
+                )
             if (self.sample_starts < 0).any() or ((self.sample_starts + span) > tlen).any():
                 raise ValueError(
                     "sample_starts entries must satisfy 0 <= i and i + input_len + pred_len <= len(series)."
