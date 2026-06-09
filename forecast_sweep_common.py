@@ -14,6 +14,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset, Subset
 
 
+def _parse_optional_gap_seconds(value) -> Optional[float]:
+    """CLI helper: omit flag, or pass none/off/0 to disable max-gap filtering."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in ("", "none", "off", "no", "disable", "disabled", "0", "0.0"):
+        return None
+    return float(value)
+
+
 def add_common_args(parser, default_output_dir: str, default_checkpoint_name: str):
     parser.add_argument(
         "--train-csv",
@@ -215,11 +225,12 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
     )
     parser.add_argument(
         "--max-consecutive-timestamp-gap-seconds",
-        type=float,
+        type=_parse_optional_gap_seconds,
         default=None,
         metavar="S",
         help="If set, exclude any window that contains a consecutive TIMESTAMP gap larger than S seconds "
-        "(no windows crossing long outages). Combines with uniform-step filtering when that is enabled.",
+        "(no windows crossing long outages). Combines with uniform-step filtering when that is enabled. "
+        "Use none/off/0 to disable (finetune: omit this flag or pass none).",
     )
     parser.add_argument(
         "--train-window-stride",

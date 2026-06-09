@@ -28,7 +28,7 @@ from sensors import AHU_2_9_SENSOR_DESCS  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    default_input = DEPLOY_ROOT / "data" / "vibration_May.csv"
+    default_input = DEPLOY_ROOT / "data" / "Vibration_sensors_2022_to_2026.csv"
     default_output = DEPLOY_ROOT / "output" / "predictions.json"
     default_models = DEPLOY_ROOT / "models"
 

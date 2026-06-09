@@ -11,8 +11,8 @@
 #SBATCH -o ~/logs/%x_%j.out
 #SBATCH -e ~/logs/%x_%j.err
 
-# Fine-tune (option 1): mixed historical + early-May train CSV, May val/test,
-# load weights from a prior run_transformer_tuning.sbatch checkpoint, low LR.
+# Fine-tune on Jan–Jun splits (70/15/15) from build_jan2jun_only_splits.py,
+# load weights from finetune/model_to_finetune/*.pth, low LR.
 #
 # Prereqs:
 #   1) Run finetune/build_finetune_splits.ipynb (writes splits under data_AHU_2_9_Blower_DE_A/splits/).
@@ -28,23 +28,33 @@
 #
 # Optional overrides:
 #   FINETUNE_LR=1e-5  FINETUNE_EPOCHS=80  EARLY_STOPPING_PATIENCE=15
-#   REQUIRE_UNIFORM_TIMESTEP=1  (match full tuning; may drop val/test to 0 windows on short May splits)
+#   REQUIRE_UNIFORM_TIMESTEP=1
+#   MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=1860  (strict; like full tuning)
 
 set -euo pipefail
 
 mkdir -p ~/logs
 
-# --- Window rules (finetune defaults differ from full tuning) ---
-# May val/test are only ~177 rows each; strict 1800±60s on every step in a 96-row window
-# often yields 0 val/test windows (gaps in May). Default: max-gap only; optional strict uniform.
-MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS:-1860}
+# --- Window rules (finetune defaults: relaxed so short val/test slices get windows) ---
+# MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS:
+#   (empty)|none|0  = OFF — no max-gap filter (recommended for finetune val/test)
+#   1860            = same as full tuning (~31 min; often yields val/test 0 windows)
 REQUIRE_UNIFORM_TIMESTEP=${REQUIRE_UNIFORM_TIMESTEP:-0}
+MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS:-}
 UNIFORM_STEP_SECONDS=${UNIFORM_STEP_SECONDS:-1800}
 UNIFORM_TOL_SECONDS=${UNIFORM_TOL_SECONDS:-60}
 if [ "${REQUIRE_UNIFORM_TIMESTEP}" = "1" ]; then
   _UNIFORM_FLAGS="--require-uniform-timestep --uniform-step-seconds ${UNIFORM_STEP_SECONDS} --uniform-step-tolerance-seconds ${UNIFORM_TOL_SECONDS}"
 else
   _UNIFORM_FLAGS="--no-require-uniform-timestep"
+fi
+_MAX_GAP="${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS}"
+_MAX_GAP_FLAGS=()
+if [ -n "${_MAX_GAP}" ] && [ "${_MAX_GAP}" != "none" ] && [ "${_MAX_GAP}" != "0" ]; then
+  _MAX_GAP_FLAGS=(--max-consecutive-timestamp-gap-seconds "${_MAX_GAP}")
+  echo "Max TIMESTAMP gap filter: ≤ ${_MAX_GAP}s inside each window."
+else
+  echo "Max TIMESTAMP gap filter: OFF (all sliding windows allowed; gaps may appear inside windows)."
 fi
 
 FINETUNE_EPOCHS=${FINETUNE_EPOCHS:-120}
@@ -53,7 +63,7 @@ EARLY_STOPPING_PATIENCE=${EARLY_STOPPING_PATIENCE:-20}
 WEIGHT_DECAY=${WEIGHT_DECAY:-1e-4}
 LOSS_TAIL_WEIGHT=${LOSS_TAIL_WEIGHT:-1.0}
 
-COMMON_TRAIN="--epochs ${FINETUNE_EPOCHS} --batch-size 16 --early-stopping-patience ${EARLY_STOPPING_PATIENCE} --min-delta 1e-6 --scheduler-patience 6 --pred-lens 48 --pred-smoothing-window 1 ${_UNIFORM_FLAGS} --max-consecutive-timestamp-gap-seconds ${MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
+COMMON_TRAIN="--epochs ${FINETUNE_EPOCHS} --batch-size 16 --early-stopping-patience ${EARLY_STOPPING_PATIENCE} --min-delta 1e-6 --scheduler-patience 6 --pred-lens 48 --pred-smoothing-window 1 ${_UNIFORM_FLAGS} ${_MAX_GAP_FLAGS[*]} --train-window-stride 1 --val-window-stride 0 --test-window-stride 0"
 COMMON_LOSS="--loss-point-weight 0.7 --loss-diff-weight 0.9 --loss-curvature-weight 0.5 --loss-variance-weight 0.2 --loss-tail-weight ${LOSS_TAIL_WEIGHT}"
 
 ENABLE_FORECAST_QUANTILES=${ENABLE_FORECAST_QUANTILES:-1}
@@ -133,11 +143,10 @@ for f in "${TRAIN_CSV}" "${VAL_CSV}" "${TEST_CSV}"; do
 done
 
 DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
-DATA_TAG="finetune_blower_de_a_may"
+DATA_TAG="finetune_blower_de_a_jan2jun"
 
 # --- Prior transformer checkpoint (required) ---
-# Default: deployment export from tuning; override on Slurm with INIT_CHECKPOINT=...
-INIT_CHECKPOINT=${INIT_CHECKPOINT:-${SCRIPT_DIR}/deployment/models/AHU_2_9_Blower_DE_A_v2.pth}
+INIT_CHECKPOINT=${INIT_CHECKPOINT:-${SCRIPT_DIR}/finetune/model_to_finetune/AHU_2_9_Blower_DE_A_v2.pth}
 if [ ! -f "${INIT_CHECKPOINT}" ]; then
   echo "ERROR: INIT_CHECKPOINT not found: ${INIT_CHECKPOINT}" >&2
   echo "Set INIT_CHECKPOINT to the .pth from your run_transformer_tuning.sbatch best_model rerun, e.g.:" >&2

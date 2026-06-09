@@ -5,6 +5,7 @@
 *.pth
 *.json
 *.html
+*.zip
 
 # Slurm / training logs
 *.out
