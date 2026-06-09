@@ -40,6 +40,14 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         metavar="PATH",
         help="Companion to --train-csv for an explicit validation set (disables row-based val split).",
     )
+    parser.add_argument(
+        "--window-manifest",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="JSON from build_*_purged_splits.py: purged random train/val window starts on --train-csv "
+        "(dev period) plus chronological --test-csv (temporal holdout). Omit --val-csv.",
+    )
     parser.add_argument("--train-val-csv", type=str, default="data_train_val.csv")
     parser.add_argument("--test-csv", type=str, default="data_test_anomalous.csv")
     parser.add_argument(
@@ -715,6 +723,19 @@ def compute_uniform_timestep_start_indices(
         tolerance_seconds=tolerance_seconds,
         max_consecutive_gap_seconds=max_consecutive_gap_seconds,
     )
+
+
+def load_window_manifest(path: str) -> dict:
+    """Load purged dev window manifest (train/val starts into dev CSV)."""
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        raise FileNotFoundError(f"window manifest not found: {abs_path}")
+    with open(abs_path, encoding="utf-8") as fp:
+        data = json.load(fp)
+    for key in ("train_window_starts", "val_window_starts", "input_len", "pred_len"):
+        if key not in data:
+            raise ValueError(f"window manifest missing required key {key!r}: {abs_path}")
+    return data
 
 
 def row_indices_covered_by_windows(starts: np.ndarray, span: int, n_rows: int) -> np.ndarray:
@@ -1727,13 +1748,22 @@ def run_sweep(
 
     tr_path = args.train_csv
     va_path = args.val_csv
-    if (tr_path is None) ^ (va_path is None):
+    manifest_path = getattr(args, "window_manifest", None)
+    manifest_mode = manifest_path is not None
+    if manifest_mode:
+        if tr_path is None or args.test_csv is None:
+            raise ValueError("--window-manifest requires --train-csv (dev) and --test-csv (holdout).")
+        if va_path is not None:
+            raise ValueError("With --window-manifest, omit --val-csv (val windows come from the manifest).")
+        if args.single_csv is not None:
+            raise ValueError("Use either --single-csv or --window-manifest, not both.")
+    elif (tr_path is None) ^ (va_path is None):
         raise ValueError("Set both --train-csv and --val-csv, or neither (use --train-val-csv for train+val).")
-    explicit_tv = tr_path is not None and va_path is not None
+    explicit_tv = tr_path is not None and va_path is not None and not manifest_mode
     single_file_mode = args.single_csv is not None
 
-    if single_file_mode and explicit_tv:
-        raise ValueError("Use either --single-csv or (--train-csv and --val-csv), not both.")
+    if single_file_mode and (explicit_tv or manifest_mode):
+        raise ValueError("Use either --single-csv or (--train-csv [+ --val-csv | --window-manifest]), not both.")
     if single_file_mode:
         df_all = pd.read_csv(args.single_csv)
         df_all["TIMESTAMP"] = parse_timestamp_series(df_all["TIMESTAMP"], args.single_csv)
@@ -1755,6 +1785,17 @@ def run_sweep(
             f"Single-CSV split (window counts): train={args.train_ratio:.4f}, val={args.val_ratio:.4f}, "
             f"test={rte_resolve:.4f}"
         )
+    elif manifest_mode:
+        df_test = pd.read_csv(args.test_csv)
+        df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+        df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_train = pd.read_csv(tr_path)
+        df_train["TIMESTAMP"] = parse_timestamp_series(df_train["TIMESTAMP"], tr_path)
+        df_train = df_train.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_val = None
+        df_train_val = None
+        df_all = None
+        setattr(args, "_window_manifest", load_window_manifest(manifest_path))
     elif explicit_tv:
         df_test = pd.read_csv(args.test_csv)
         df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
@@ -1782,6 +1823,9 @@ def run_sweep(
     def _frames_iter():
         if single_file_mode:
             yield ("data", df_all, args.single_csv)
+        elif manifest_mode:
+            yield ("dev", df_train, tr_path)
+            yield ("holdout", df_test, args.test_csv)
         elif explicit_tv:
             yield ("train", df_train, tr_path)
             yield ("val", df_val, va_path)
@@ -1799,7 +1843,7 @@ def run_sweep(
 
     if single_file_mode:
         ref_frame = df_all
-    elif explicit_tv:
+    elif explicit_tv or manifest_mode:
         ref_frame = df_train
     else:
         ref_frame = df_train_val
@@ -1836,6 +1880,9 @@ def run_sweep(
 
         if single_file_mode:
             _smooth_value_col(df_all)
+        elif manifest_mode:
+            _smooth_value_col(df_train)
+            _smooth_value_col(df_test)
         elif explicit_tv:
             _smooth_value_col(df_train)
             _smooth_value_col(df_val)
@@ -1847,11 +1894,38 @@ def run_sweep(
     test_series = df_test[vc].to_numpy(dtype=np.float32)
     test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
 
-    if explicit_tv:
+    if manifest_mode:
+        train_series = df_train[vc].to_numpy(dtype=np.float32)
+        train_features = df_train[feature_cols].to_numpy(dtype=np.float32)
+        test_series = df_test[vc].to_numpy(dtype=np.float32)
+        test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
+        val_series = val_features = None
+        tv_series = tv_features = tv_feat_norm = tv_target_norm = None
+        train_end_idx = None
+        full_series = full_features = None
+        manifest = getattr(args, "_window_manifest")
+        m_span = int(manifest["input_len"]) + int(manifest["pred_len"])
+        train_starts_m = np.asarray(manifest["train_window_starts"], dtype=np.int64)
+        row_tr = row_indices_covered_by_windows(train_starts_m, m_span, len(train_series))
+        train_mean = float(train_series[row_tr].mean())
+        train_std = float(train_series[row_tr].std()) + 1e-8
+        feat_mean = train_features[row_tr].mean(axis=0)
+        feat_std = train_features[row_tr].std(axis=0) + 1e-8
+        train_feat_norm = (train_features - feat_mean) / feat_std
+        train_target_norm = (train_series - train_mean) / train_std
+        val_feat_norm = train_feat_norm
+        val_target_norm = train_target_norm
+        test_feat_norm = (test_features - feat_mean) / feat_std
+        test_target_norm = (test_series - train_mean) / train_std
+        print(f"train_mean: {train_mean:.6f}")
+        print(f"train_std : {train_std:.6f}")
+    elif explicit_tv:
         train_series = df_train[vc].to_numpy(dtype=np.float32)
         val_series = df_val[vc].to_numpy(dtype=np.float32)
         train_features = df_train[feature_cols].to_numpy(dtype=np.float32)
         val_features = df_val[feature_cols].to_numpy(dtype=np.float32)
+        test_series = df_test[vc].to_numpy(dtype=np.float32)
+        test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
         tv_series = tv_features = tv_feat_norm = tv_target_norm = None
         train_end_idx = None
         full_series = full_features = None
@@ -1872,11 +1946,23 @@ def run_sweep(
     setattr(args, "feature_columns_resolved", feature_cols)
     setattr(args, "data_split_explicit_tv", explicit_tv)
     setattr(args, "data_split_single_csv", single_file_mode)
+    setattr(args, "data_split_manifest", manifest_mode)
     print(f"Target column: {vc}")
     print(f"Input feature columns ({n_features}): {feature_cols}")
     if single_file_mode:
         print(f"Data split: single CSV ({args.single_csv}), chronological window ratios")
         print(f"Rows in file: {len(full_series)}")
+    elif manifest_mode:
+        manifest = getattr(args, "_window_manifest")
+        print("Data split: purged random dev windows + temporal holdout (window manifest)")
+        print(f"Dev rows (train-csv)     : {len(train_series)}  ({tr_path})")
+        print(f"Holdout rows (test-csv)  : {len(test_series)}  ({args.test_csv})")
+        print(f"Window manifest          : {manifest_path}")
+        print(
+            f"Manifest windows         : train={len(manifest['train_window_starts'])} "
+            f"val={len(manifest['val_window_starts'])} "
+            f"(chunk_rows={manifest.get('chunk_rows')}, holdout_start={manifest.get('holdout_start')})"
+        )
     elif explicit_tv:
         print("Data split: explicit train / val / test CSVs")
         print("(Val holdout fraction --val-ratio is ignored when --train-csv and --val-csv are set.)")
@@ -1898,6 +1984,15 @@ def run_sweep(
                 "single",
                 args.uniform_step_seconds,
                 args.uniform_step_tolerance_seconds,
+            )
+        elif manifest_mode:
+            summarize_timestamp_steps(
+                df_train["TIMESTAMP"], "dev",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_test["TIMESTAMP"], "holdout",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
             )
         elif explicit_tv:
             summarize_timestamp_steps(
@@ -1930,6 +2025,8 @@ def run_sweep(
     if single_file_mode:
         train_mean = float("nan")
         train_std = float("nan")
+    elif manifest_mode:
+        pass
     elif explicit_tv:
         train_mean = train_series.mean()
         train_std = train_series.std() + 1e-8
@@ -2052,6 +2149,74 @@ def run_sweep(
                         input_len=input_len,
                         pred_len=pred_len,
                         sample_starts=test_starts_arr,
+                    )
+                    tv_starts = None
+                elif manifest_mode:
+                    manifest = getattr(args, "_window_manifest")
+                    m_in = int(manifest["input_len"])
+                    m_pr = int(manifest["pred_len"])
+                    if m_in != int(input_len) or m_pr != int(pred_len):
+                        raise ValueError(
+                            f"Window manifest lens ({m_in}, {m_pr}) != training ({input_len}, {pred_len}). "
+                            "Match --input-lens / --pred-lens to the manifest or rebuild splits."
+                        )
+                    train_starts = np.asarray(manifest["train_window_starts"], dtype=np.int64)
+                    val_starts = np.asarray(manifest["val_window_starts"], dtype=np.int64)
+                    n_dev_slide = max(0, len(train_target_norm) - span + 1)
+                    n_hold_slide = max(0, len(test_target_norm) - span + 1)
+                    if args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                    else:
+                        test_starts = (
+                            np.arange(n_hold_slide, dtype=np.int64)
+                            if n_hold_slide > 0
+                            else np.zeros(0, dtype=np.int64)
+                        )
+                    print(
+                        f"  Manifest dev windows: train {len(train_starts)} | val {len(val_starts)} "
+                        f"(dense dev starts {n_dev_slide}); "
+                        f"holdout {len(test_starts)}/{n_hold_slide} "
+                        f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                    )
+                    v_stride = _resolve_eval_window_stride(args.val_window_stride, pred_len)
+                    te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                    _tr0, _va0, _te0 = len(train_starts), len(val_starts), len(test_starts)
+                    train_starts = subsample_window_starts(
+                        train_starts, args.train_window_stride, split_name="train"
+                    )
+                    val_starts = subsample_window_starts(val_starts, v_stride, split_name="val")
+                    test_starts = subsample_window_starts(test_starts, te_stride, split_name="holdout")
+                    if (
+                        len(train_starts) != _tr0
+                        or len(val_starts) != _va0
+                        or len(test_starts) != _te0
+                    ):
+                        print(
+                            f"    Window strides: train every {max(1, int(args.train_window_stride))} "
+                            f"({_tr0}→{len(train_starts)}), "
+                            f"val every {v_stride} ({_va0}→{len(val_starts)}), "
+                            f"holdout every {te_stride} ({_te0}→{len(test_starts)})"
+                        )
+                    train_dataset = MultiStepDeltaDataset(
+                        train_feat_norm,
+                        train_target_norm,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=train_starts,
+                    )
+                    val_dataset = MultiStepDeltaDataset(
+                        val_feat_norm,
+                        val_target_norm,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=val_starts,
+                    )
+                    test_dataset = MultiStepDeltaDataset(
+                        test_feat_norm,
+                        test_target_norm,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=test_starts,
                     )
                     tv_starts = None
                 elif args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
@@ -2546,8 +2711,13 @@ def run_sweep(
         "data_split_mode": (
             "single_csv_window_ratios"
             if single_file_mode
-            else ("explicit_train_val_test" if explicit_tv else "train_val_holdout")
+            else (
+                "purged_dev_manifest_holdout"
+                if manifest_mode
+                else ("explicit_train_val_test" if explicit_tv else "train_val_holdout")
+            )
         ),
+        "window_manifest": manifest_path if manifest_mode else None,
         "single_csv": args.single_csv if single_file_mode else None,
         "train_ratio_window": float(args.train_ratio) if single_file_mode else None,
         "val_ratio_window": float(args.val_ratio) if single_file_mode else None,
@@ -2555,7 +2725,7 @@ def run_sweep(
         if single_file_mode
         else None,
         "min_windows_per_split": int(args.min_windows_per_split) if single_file_mode else None,
-        "train_csv": tr_path if explicit_tv else None,
+        "train_csv": tr_path if (explicit_tv or manifest_mode) else None,
         "val_csv": va_path if explicit_tv else None,
         "train_val_csv": None if (explicit_tv or single_file_mode) else args.train_val_csv,
         "test_csv": None if single_file_mode else args.test_csv,
@@ -2570,7 +2740,7 @@ def run_sweep(
         "weight_decay": args.weight_decay,
         "val_ratio": (
             None
-            if explicit_tv or single_file_mode
+            if explicit_tv or single_file_mode or manifest_mode
             else float(args.val_ratio)
         ),
         "early_stopping_patience": args.early_stopping_patience,

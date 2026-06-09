@@ -11,12 +11,13 @@
 #SBATCH -o ~/logs/%x_%j.out
 #SBATCH -e ~/logs/%x_%j.err
 
-# Fine-tune on Jan–Jun splits (70/15/15) from build_jan2jun_only_splits.py,
-# load weights from finetune/model_to_finetune/*.pth, low LR.
+# Fine-tune on Jan–Jun with purged random dev windows + temporal holdout
+# (build_jan2jun_purged_splits.py), load weights from finetune/model_to_finetune/*.pth.
 #
 # Prereqs:
-#   1) Run finetune/build_finetune_splits.ipynb (writes splits under data_AHU_2_9_Blower_DE_A/splits/).
-#   2) Point INIT_CHECKPOINT at your best .pth (same architecture: input_len=48, pred_len=48).
+#   1) python finetune/build_jan2jun_purged_splits.py
+#      → finetune/data_AHU_2_9_Blower_DE_A/splits_purged/{dev.csv,holdout.csv,window_manifest.json}
+#   2) INIT_CHECKPOINT: same architecture (input_len=48, pred_len=48).
 #
 # Submit from repo root:
 #   cd /path/to/Murata_NGYX
@@ -128,22 +129,22 @@ if [ ! -f "${SCRIPT_DIR}/train_transformer_sweep.py" ]; then
 fi
 echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
 
-# --- Finetune CSVs (from build_finetune_splits.ipynb) ---
-SPLIT_DIR="${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/splits"
-TRAIN_CSV=${TRAIN_CSV:-${SPLIT_DIR}/train.csv}
-VAL_CSV=${VAL_CSV:-${SPLIT_DIR}/val.csv}
-TEST_CSV=${TEST_CSV:-${SPLIT_DIR}/test.csv}
+# --- Purged dev + temporal holdout (build_jan2jun_purged_splits.py) ---
+SPLIT_DIR="${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/splits_purged"
+DEV_CSV=${DEV_CSV:-${SPLIT_DIR}/dev.csv}
+HOLDOUT_CSV=${HOLDOUT_CSV:-${SPLIT_DIR}/holdout.csv}
+WINDOW_MANIFEST=${WINDOW_MANIFEST:-${SPLIT_DIR}/window_manifest.json}
 
-for f in "${TRAIN_CSV}" "${VAL_CSV}" "${TEST_CSV}"; do
+for f in "${DEV_CSV}" "${HOLDOUT_CSV}" "${WINDOW_MANIFEST}"; do
   if [ ! -f "${f}" ]; then
     echo "ERROR: missing split file: ${f}" >&2
-    echo "Run finetune/build_finetune_splits.ipynb first." >&2
+    echo "Run: python finetune/build_jan2jun_purged_splits.py" >&2
     exit 1
   fi
 done
 
-DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
-DATA_TAG="finetune_blower_de_a_jan2jun"
+DATA_FLAGS="--train-csv ${DEV_CSV} --test-csv ${HOLDOUT_CSV} --window-manifest ${WINDOW_MANIFEST}"
+DATA_TAG="finetune_blower_de_a_jan2jun_purged"
 
 # --- Prior transformer checkpoint (required) ---
 INIT_CHECKPOINT=${INIT_CHECKPOINT:-${SCRIPT_DIR}/finetune/model_to_finetune/AHU_2_9_Blower_DE_A_v2.pth}
