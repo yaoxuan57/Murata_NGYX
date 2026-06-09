@@ -1786,16 +1786,25 @@ def run_sweep(
             f"test={rte_resolve:.4f}"
         )
     elif manifest_mode:
-        df_test = pd.read_csv(args.test_csv)
-        df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
-        df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
+        manifest = load_window_manifest(manifest_path)
+        setattr(args, "_window_manifest", manifest)
         df_train = pd.read_csv(tr_path)
         df_train["TIMESTAMP"] = parse_timestamp_series(df_train["TIMESTAMP"], tr_path)
         df_train = df_train.sort_values("TIMESTAMP").reset_index(drop=True)
+        _same_series = bool(manifest.get("same_series_test")) or (
+            os.path.normpath(os.path.abspath(tr_path))
+            == os.path.normpath(os.path.abspath(args.test_csv))
+        )
+        setattr(args, "_manifest_same_series_test", _same_series)
+        if _same_series:
+            df_test = df_train
+        else:
+            df_test = pd.read_csv(args.test_csv)
+            df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+            df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
         df_val = None
         df_train_val = None
         df_all = None
-        setattr(args, "_window_manifest", load_window_manifest(manifest_path))
     elif explicit_tv:
         df_test = pd.read_csv(args.test_csv)
         df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
@@ -1824,8 +1833,9 @@ def run_sweep(
         if single_file_mode:
             yield ("data", df_all, args.single_csv)
         elif manifest_mode:
-            yield ("dev", df_train, tr_path)
-            yield ("holdout", df_test, args.test_csv)
+            yield ("series", df_train, tr_path)
+            if not getattr(args, "_manifest_same_series_test", False):
+                yield ("holdout", df_test, args.test_csv)
         elif explicit_tv:
             yield ("train", df_train, tr_path)
             yield ("val", df_val, va_path)
@@ -1882,7 +1892,8 @@ def run_sweep(
             _smooth_value_col(df_all)
         elif manifest_mode:
             _smooth_value_col(df_train)
-            _smooth_value_col(df_test)
+            if not getattr(args, "_manifest_same_series_test", False):
+                _smooth_value_col(df_test)
         elif explicit_tv:
             _smooth_value_col(df_train)
             _smooth_value_col(df_val)
@@ -1954,14 +1965,21 @@ def run_sweep(
         print(f"Rows in file: {len(full_series)}")
     elif manifest_mode:
         manifest = getattr(args, "_window_manifest")
-        print("Data split: purged random dev windows + temporal holdout (window manifest)")
-        print(f"Dev rows (train-csv)     : {len(train_series)}  ({tr_path})")
-        print(f"Holdout rows (test-csv)  : {len(test_series)}  ({args.test_csv})")
+        same_series = getattr(args, "_manifest_same_series_test", False)
+        if same_series:
+            print("Data split: purged random chunks on full series (train/val/test window manifest)")
+            print(f"Series rows (train+test) : {len(train_series)}  ({tr_path})")
+        else:
+            print("Data split: purged random dev windows + temporal holdout (window manifest)")
+            print(f"Dev rows (train-csv)     : {len(train_series)}  ({tr_path})")
+            print(f"Holdout rows (test-csv)  : {len(test_series)}  ({args.test_csv})")
         print(f"Window manifest          : {manifest_path}")
+        _te_n = len(manifest.get("test_window_starts") or [])
         print(
             f"Manifest windows         : train={len(manifest['train_window_starts'])} "
             f"val={len(manifest['val_window_starts'])} "
-            f"(chunk_rows={manifest.get('chunk_rows')}, holdout_start={manifest.get('holdout_start')})"
+            f"test={_te_n} "
+            f"(mode={manifest.get('mode')}, chunk_rows={manifest.get('chunk_rows')})"
         )
     elif explicit_tv:
         print("Data split: explicit train / val / test CSVs")
@@ -2162,20 +2180,31 @@ def run_sweep(
                         )
                     train_starts = np.asarray(manifest["train_window_starts"], dtype=np.int64)
                     val_starts = np.asarray(manifest["val_window_starts"], dtype=np.int64)
-                    n_dev_slide = max(0, len(train_target_norm) - span + 1)
-                    n_hold_slide = max(0, len(test_target_norm) - span + 1)
-                    if args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
-                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                    n_series_slide = max(0, len(train_target_norm) - span + 1)
+                    manifest_test = manifest.get("test_window_starts")
+                    same_series = getattr(args, "_manifest_same_series_test", False)
+                    if manifest_test is not None:
+                        test_starts = np.asarray(manifest_test, dtype=np.int64)
+                        test_feat_norm_ds = train_feat_norm
+                        test_target_norm_ds = train_target_norm
+                        test_label = "test (manifest)"
                     else:
-                        test_starts = (
-                            np.arange(n_hold_slide, dtype=np.int64)
-                            if n_hold_slide > 0
-                            else np.zeros(0, dtype=np.int64)
-                        )
+                        n_hold_slide = max(0, len(test_target_norm) - span + 1)
+                        if args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
+                            test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                        else:
+                            test_starts = (
+                                np.arange(n_hold_slide, dtype=np.int64)
+                                if n_hold_slide > 0
+                                else np.zeros(0, dtype=np.int64)
+                            )
+                        test_feat_norm_ds = test_feat_norm
+                        test_target_norm_ds = test_target_norm
+                        test_label = "holdout (chrono)"
                     print(
-                        f"  Manifest dev windows: train {len(train_starts)} | val {len(val_starts)} "
-                        f"(dense dev starts {n_dev_slide}); "
-                        f"holdout {len(test_starts)}/{n_hold_slide} "
+                        f"  Manifest windows: train {len(train_starts)} | val {len(val_starts)} | "
+                        f"{test_label} {len(test_starts)} "
+                        f"(dense series starts {n_series_slide}; same_csv={same_series}) "
                         f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
                     )
                     v_stride = _resolve_eval_window_stride(args.val_window_stride, pred_len)
@@ -2185,7 +2214,9 @@ def run_sweep(
                         train_starts, args.train_window_stride, split_name="train"
                     )
                     val_starts = subsample_window_starts(val_starts, v_stride, split_name="val")
-                    test_starts = subsample_window_starts(test_starts, te_stride, split_name="holdout")
+                    test_starts = subsample_window_starts(
+                        test_starts, te_stride, split_name="test" if manifest_test is not None else "holdout"
+                    )
                     if (
                         len(train_starts) != _tr0
                         or len(val_starts) != _va0
@@ -2212,8 +2243,8 @@ def run_sweep(
                         sample_starts=val_starts,
                     )
                     test_dataset = MultiStepDeltaDataset(
-                        test_feat_norm,
-                        test_target_norm,
+                        test_feat_norm_ds,
+                        test_target_norm_ds,
                         input_len=input_len,
                         pred_len=pred_len,
                         sample_starts=test_starts,

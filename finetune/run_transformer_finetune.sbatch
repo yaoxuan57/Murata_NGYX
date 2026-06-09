@@ -11,12 +11,12 @@
 #SBATCH -o ~/logs/%x_%j.out
 #SBATCH -e ~/logs/%x_%j.err
 
-# Fine-tune on Jan–Jun with purged random dev windows + temporal holdout
-# (build_jan2jun_purged_splits.py), load weights from finetune/model_to_finetune/*.pth.
+# Fine-tune on Jan–Jun with purged random 70/15/15 chunk split on the FULL timeline
+# (build_jan2jun_purged_splits.py --split-mode full_random), load init .pth weights.
 #
 # Prereqs:
 #   1) python finetune/build_jan2jun_purged_splits.py
-#      → finetune/data_AHU_2_9_Blower_DE_A/splits_purged/{dev.csv,holdout.csv,window_manifest.json}
+#      → finetune/data_AHU_2_9_Blower_DE_A/splits_purged/{full.csv,window_manifest.json}
 #   2) INIT_CHECKPOINT: same architecture (input_len=48, pred_len=48).
 #
 # Submit from repo root:
@@ -129,22 +129,21 @@ if [ ! -f "${SCRIPT_DIR}/train_transformer_sweep.py" ]; then
 fi
 echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
 
-# --- Purged dev + temporal holdout (build_jan2jun_purged_splits.py) ---
+# --- Purged full-timeline random split (build_jan2jun_purged_splits.py) ---
 SPLIT_DIR="${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/splits_purged"
-DEV_CSV=${DEV_CSV:-${SPLIT_DIR}/dev.csv}
-HOLDOUT_CSV=${HOLDOUT_CSV:-${SPLIT_DIR}/holdout.csv}
+FULL_CSV=${FULL_CSV:-${SPLIT_DIR}/full.csv}
 WINDOW_MANIFEST=${WINDOW_MANIFEST:-${SPLIT_DIR}/window_manifest.json}
 
-for f in "${DEV_CSV}" "${HOLDOUT_CSV}" "${WINDOW_MANIFEST}"; do
+for f in "${FULL_CSV}" "${WINDOW_MANIFEST}"; do
   if [ ! -f "${f}" ]; then
     echo "ERROR: missing split file: ${f}" >&2
-    echo "Run: python finetune/build_jan2jun_purged_splits.py" >&2
+    echo "Run: python finetune/build_jan2jun_purged_splits.py --split-mode full_random" >&2
     exit 1
   fi
 done
 
-DATA_FLAGS="--train-csv ${DEV_CSV} --test-csv ${HOLDOUT_CSV} --window-manifest ${WINDOW_MANIFEST}"
-DATA_TAG="finetune_blower_de_a_jan2jun_purged"
+DATA_FLAGS="--train-csv ${FULL_CSV} --test-csv ${FULL_CSV} --window-manifest ${WINDOW_MANIFEST}"
+DATA_TAG="finetune_blower_de_a_jan2jun_full_random"
 
 # --- Prior transformer checkpoint (required) ---
 INIT_CHECKPOINT=${INIT_CHECKPOINT:-${SCRIPT_DIR}/finetune/model_to_finetune/AHU_2_9_Blower_DE_A_v2.pth}
