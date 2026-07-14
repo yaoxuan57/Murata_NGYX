@@ -1,0 +1,3218 @@
+import copy
+import json
+import os
+import random
+from typing import Callable, Dict, Optional, Set, Tuple
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset, Subset
+
+
+def _parse_optional_gap_seconds(value) -> Optional[float]:
+    """CLI helper: omit flag, or pass none/off/0 to disable max-gap filtering."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in ("", "none", "off", "no", "disable", "disabled", "0", "0.0"):
+        return None
+    return float(value)
+
+
+def add_common_args(parser, default_output_dir: str, default_checkpoint_name: str):
+    parser.add_argument(
+        "--train-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="If set together with --val-csv, load three disjoint CSVs (train / val / test). "
+        "Normalization uses train only. Prefer files cut at timestamp gaps so each file is one contiguous run.",
+    )
+    parser.add_argument(
+        "--val-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Companion to --train-csv for an explicit validation set (disables row-based val split).",
+    )
+    parser.add_argument(
+        "--window-manifest",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="JSON from build_*_purged_splits.py: purged random train/val window starts on --train-csv "
+        "(dev period) plus chronological --test-csv (temporal holdout). Omit --val-csv.",
+    )
+    parser.add_argument("--train-val-csv", type=str, default="data_train_val.csv")
+    parser.add_argument("--test-csv", type=str, default="data_test_anomalous.csv")
+    parser.add_argument(
+        "--single-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load one chronological CSV and split train/val/test by window counts (see --train-ratio, --val-ratio, --test-ratio). "
+        "Each window still requires uniform TIMESTAMP steps (--require-uniform-timestep). "
+        "Cannot be combined with --train-csv/--val-csv or the two-file train_val+test setup.",
+    )
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.70,
+        help="With --single-csv: target fraction of valid windows for training (chronological). Ignored otherwise.",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=None,
+        help="With --single-csv: test window fraction; default 1 - train_ratio - val_ratio.",
+    )
+    parser.add_argument(
+        "--min-windows-per-split",
+        type=int,
+        default=1,
+        metavar="N",
+        help="With --single-csv: minimum windows in each split after ratio allocation (raised if impossible).",
+    )
+    parser.add_argument(
+        "--value-column",
+        type=str,
+        default="Acceleration RMS (smoothed)",
+        help="CSV column used as the univariate forecast target. Use 'Acceleration RMS' for raw (unsmoothed) CSVs.",
+    )
+    parser.add_argument(
+        "--feature-columns",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Input feature columns. If omitted, uses only --value-column.",
+    )
+    parser.add_argument(
+        "--use-all-numeric-features",
+        dest="use_all_numeric_features",
+        action="store_true",
+        help="Use all numeric columns except TIMESTAMP as input features.",
+    )
+    parser.add_argument(
+        "--no-use-all-numeric-features",
+        dest="use_all_numeric_features",
+        action="store_false",
+    )
+    parser.set_defaults(use_all_numeric_features=False)
+    parser.add_argument(
+        "--raw-compare-column",
+        type=str,
+        default=None,
+        metavar="COLUMN",
+        help="Reserved/unused by current plotting code. Rolling-window PNGs plot the history of "
+        "--value-column exactly as used after optional --target-smoothing-window (aligned with "
+        "train/val/test). Forecast series are raw model outputs unless --pred-smoothing-window>1.",
+    )
+    parser.add_argument("--output-dir", type=str, default=default_output_dir)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=150)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-5)
+    parser.add_argument("--input-lens", type=int, nargs="+", default=[432,576,864])
+    parser.add_argument("--pred-lens", type=int, nargs="+", default=[288])
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.15,
+        help="1) Legacy: holdout fraction of windows from --train-val-csv. "
+        "2) With --single-csv: val window fraction (with --train-ratio, --test-ratio). "
+        "Ignored when --train-csv and --val-csv are set.",
+    )
+    parser.add_argument("--early-stopping-patience", type=int, default=50)
+    parser.add_argument("--scheduler-patience", type=int, default=3)
+    parser.add_argument("--scheduler-factor", type=float, default=0.5)
+    parser.add_argument("--min-delta", type=float, default=1e-6)
+    parser.add_argument("--plot-sample-idx", type=int, default=200)
+    parser.add_argument("--checkpoint-name", type=str, default=default_checkpoint_name)
+    parser.add_argument(
+        "--init-checkpoint",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Optional .pth from a prior run: load model_state_dict before training (optimizer reset). "
+        "Architecture must match --input-lens / --pred-lens. train_mean/train_std are recomputed from the new train CSV.",
+    )
+    parser.add_argument("--loss-huber-delta", type=float, default=1.0)
+    parser.add_argument("--loss-point-weight", type=float, default=0.2)
+    parser.add_argument("--loss-diff-weight", type=float, default=5)
+    parser.add_argument("--loss-curvature-weight", type=float, default=2.0)
+    parser.add_argument("--loss-variance-weight", type=float, default=0.8)
+    parser.add_argument(
+        "--loss-laplacian-weight",
+        type=float,
+        default=0.3,
+        help="Extra penalty on mean squared second difference of the predicted trajectory "
+        "(suppresses high-frequency jaggedness). Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--loss-tail-weight",
+        type=float,
+        default=1.0,
+        help="Per-step loss weight at horizon=pred_len-1 (horizon 0 has weight 1.0). "
+        "Loss weights interpolate linearly from 1.0 (head) to this value (tail). "
+        "Default 1.0 = flat (no decay). Use <1.0 to down-weight late horizons "
+        "(historical default was 0.8, which let the tail drift up).",
+    )
+    parser.add_argument(
+        "--pred-smoothing-window",
+        type=int,
+        default=1,
+        metavar="K",
+        help="If K>1, apply a centered length-K moving average to each test forecast row "
+        "(raw model output) before metrics and saved plots/CSVs. K is bumped up by 1 if even. K=1 disables.",
+    )
+    parser.add_argument(
+        "--target-smoothing-window",
+        type=int,
+        default=1,
+        metavar="K",
+        help="If K>1, apply a causal (trailing) length-K moving average to --value-column in each "
+        "loaded CSV before building train/val/test windows (per file only; other feature columns "
+        "unchanged). K=1 disables.",
+    )
+    parser.add_argument("--save-window-plots", dest="save_window_plots", action="store_true")
+    parser.add_argument("--no-window-plots", dest="save_window_plots", action="store_false")
+    parser.set_defaults(save_window_plots=True)
+    parser.add_argument(
+        "--rolling-window-artifact-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="If set, write at most N per-window CSV and PNG files under rolling_window_forecasts/, "
+        "evenly spaced from the first to last window. All windows remain in all_windows_forecasts.csv.",
+    )
+    parser.add_argument(
+        "--save-stitched-test-html",
+        dest="save_stitched_test_html",
+        action="store_true",
+        help="If set, write rolling_window_forecasts/stitched_test_forecast.html: interactive Plotly figure "
+        "with the first test window's actual input context, then all test horizons on real timestamps "
+        "(median, optional quantile band, actual target). Requires plotly (pip install plotly).",
+    )
+    parser.add_argument(
+        "--no-save-stitched-test-html",
+        dest="save_stitched_test_html",
+        action="store_false",
+    )
+    parser.set_defaults(save_stitched_test_html=False)
+    parser.add_argument(
+        "--require-uniform-timestep",
+        dest="require_uniform_timestep",
+        action="store_true",
+        help="Only build windows whose TIMESTAMP steps are uniformly spaced (see --uniform-step-seconds). "
+        "Skips spanning gaps where the machine was off/rested. Rows must be chronological.",
+    )
+    parser.add_argument(
+        "--no-require-uniform-timestep",
+        dest="require_uniform_timestep",
+        action="store_false",
+    )
+    parser.set_defaults(require_uniform_timestep=True)
+    parser.add_argument(
+        "--uniform-step-seconds",
+        type=float,
+        default=5.0,
+        help="Nominal interval between consecutive rows when uniform timestep filtering is enabled.",
+    )
+    parser.add_argument(
+        "--uniform-step-tolerance-seconds",
+        type=float,
+        default=1.01,
+        help="Half-width tolerance on each step vs nominal (seconds). Rows outside nominal±tol break a contiguous run.",
+    )
+    parser.add_argument(
+        "--max-consecutive-timestamp-gap-seconds",
+        type=_parse_optional_gap_seconds,
+        default=None,
+        metavar="S",
+        help="If set, exclude any window that contains a consecutive TIMESTAMP gap larger than S seconds "
+        "(no windows crossing long outages). Combines with uniform-step filtering when that is enabled. "
+        "Use none/off/0 to disable (finetune: omit this flag or pass none).",
+    )
+    parser.add_argument(
+        "--train-window-stride",
+        type=int,
+        default=1,
+        metavar="S",
+        help="Keep every S-th uniform window start for training (1 = all starts). Applies after uniform filter.",
+    )
+    parser.add_argument(
+        "--val-window-stride",
+        type=int,
+        default=1,
+        metavar="S",
+        help="Stride on validation window starts after uniform filter. 1 = every start (legacy). "
+        "0 or negative = use the current pred_len (forecast length).",
+    )
+    parser.add_argument(
+        "--test-window-stride",
+        type=int,
+        default=1,
+        metavar="S",
+        help="Stride on test window starts after uniform filter. 1 = every start (legacy). "
+        "0 or negative = use the current pred_len (forecast length).",
+    )
+    parser.add_argument(
+        "--forecast-quantiles",
+        type=float,
+        nargs="+",
+        default=None,
+        metavar="Q",
+        help="If set (e.g. 0.05 0.5 0.95), train pinball (quantile) loss per horizon step. "
+        "Requires a model that returns (batch, n_quantiles, pred_len), e.g. train_transformer_sweep or train_dlinear_sweep. "
+        "Median slice is used for RMSE / trajectory metrics; CSVs include one column per quantile.",
+    )
+    parser.add_argument(
+        "--sensor-mapping-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="CSV with SENSOR_CODE / SENSOR_NAME for model_meta.json (default: data/sensor_id_name_mapping.csv).",
+    )
+    parser.add_argument(
+        "--model-version",
+        type=str,
+        default="v1",
+        help="Version tag embedded in model_meta.json modelName (e.g. v1).",
+    )
+    parser.add_argument(
+        "--no-model-meta-json",
+        dest="write_model_meta_json",
+        action="store_false",
+        help="Skip writing <checkpoint_stem>_meta.json beside the .pth file.",
+    )
+    parser.set_defaults(write_model_meta_json=True)
+    return parser
+
+
+def load_init_checkpoint_weights(
+    model: nn.Module,
+    checkpoint_path: str,
+    device: torch.device,
+    *,
+    input_len: int,
+    pred_len: int,
+) -> None:
+    path = os.path.abspath(checkpoint_path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"init checkpoint not found: {path}")
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    state = ckpt.get("model_state_dict")
+    if state is None:
+        raise ValueError(f"No model_state_dict in {path}")
+    ck_in = int(ckpt.get("input_len", input_len))
+    ck_pr = int(ckpt.get("pred_len", pred_len))
+    if ck_in != int(input_len) or ck_pr != int(pred_len):
+        raise ValueError(
+            f"init checkpoint lens ({ck_in}, {ck_pr}) != training ({input_len}, {pred_len}); "
+            "match --input-lens / --pred-lens to the saved model."
+        )
+    model.load_state_dict(state, strict=True)
+    prev_mean = ckpt.get("train_mean")
+    prev_std = ckpt.get("train_std")
+    print(f"Loaded init weights from {path}")
+    if prev_mean is not None and prev_std is not None:
+        print(
+            f"  (checkpoint normalization: mean={float(prev_mean):.6f}, std={float(prev_std):.6f}; "
+            "new train CSV stats will be used for this run.)"
+        )
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def mse_np(y_true, y_pred):
+    err = y_true - y_pred
+    return float(np.mean(err ** 2))
+
+
+def rmse_np(y_true, y_pred):
+    return float(np.sqrt(mse_np(y_true, y_pred)))
+
+
+def mae_np(y_true, y_pred):
+    return float(np.mean(np.abs(y_true - y_pred)))
+
+
+def mape_np(y_true, y_pred):
+    denom = np.maximum(np.abs(y_true), 1e-8)
+    return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
+
+
+def smooth_forecast_quantile_horizons(preds: np.ndarray, window: int) -> np.ndarray:
+    """Centered MA on the last axis for (n_windows, n_quantiles, pred_len)."""
+    if window <= 1:
+        return preds
+    preds = np.asarray(preds, dtype=np.float32)
+    if preds.ndim != 3:
+        raise ValueError(f"Expected preds (N, Q, L), got shape {preds.shape}")
+    out = np.empty_like(preds, dtype=np.float32)
+    for q in range(preds.shape[1]):
+        out[:, q, :] = smooth_forecast_horizons(preds[:, q, :], window)
+    return out
+
+
+def smooth_forecast_horizons(preds: np.ndarray, window: int) -> np.ndarray:
+    """Row-wise centered moving average for arrays shaped (n_windows, pred_len)."""
+    if window <= 1:
+        return preds
+    w = window if window % 2 == 1 else window + 1
+    pad = w // 2
+    kernel = np.ones(w, dtype=np.float64) / w
+    out = np.empty_like(preds, dtype=np.float64)
+    for i in range(preds.shape[0]):
+        y = np.asarray(preds[i], dtype=np.float64)
+        y_pad = np.pad(y, (pad, pad), mode="edge")
+        out[i] = np.convolve(y_pad, kernel, mode="valid")
+    return out.astype(preds.dtype, copy=False)
+
+
+def smooth_forecast_vector(vec: np.ndarray, window: int) -> np.ndarray:
+    """Centered moving average for a single 1D forecast (pred_len,)."""
+    if window <= 1:
+        return vec
+    w = window if window % 2 == 1 else window + 1
+    pad = w // 2
+    y = np.asarray(vec, dtype=np.float64)
+    kernel = np.ones(w, dtype=np.float64) / w
+    y_pad = np.pad(y, (pad, pad), mode="edge")
+    return np.convolve(y_pad, kernel, mode="valid").astype(vec.dtype, copy=False)
+
+
+def smooth_target_series_1d(vec: np.ndarray, window: int) -> np.ndarray:
+    """Causal (trailing) MA on a 1D target series; window length W, min_periods=1 at the start."""
+    if window <= 1:
+        return np.asarray(vec, dtype=np.float32)
+    w = int(window)
+    y = np.asarray(vec, dtype=np.float64)
+    n = len(y)
+    if n == 0:
+        return np.asarray(y, dtype=np.float32)
+    csum = np.concatenate(([0.0], np.cumsum(y)))
+    idx = np.arange(n, dtype=np.int64)
+    start = np.maximum(0, idx - w + 1)
+    counts = (idx - start + 1).astype(np.float64)
+    out = (csum[idx + 1] - csum[start]) / counts
+    return out.astype(np.float32)
+
+
+def r2_np(y_true, y_pred):
+    y_true_flat = y_true.reshape(-1)
+    y_pred_flat = y_pred.reshape(-1)
+    ss_res = float(np.sum((y_true_flat - y_pred_flat) ** 2))
+    ss_tot = float(np.sum((y_true_flat - y_true_flat.mean()) ** 2))
+    return 1.0 - ss_res / (ss_tot + 1e-12)
+
+
+def evaluate_metrics(y_true, y_pred):
+    return {
+        "mse": mse_np(y_true, y_pred),
+        "rmse": rmse_np(y_true, y_pred),
+        "mae": mae_np(y_true, y_pred),
+        "mape": mape_np(y_true, y_pred),
+        "r2": r2_np(y_true, y_pred),
+    }
+
+
+# Contiguous horizon bands for reporting (near-equal width). Forecast steps are 1-based (step-ahead index).
+HORIZON_PHASE_COUNT = 6
+
+
+def horizon_phase_step_ranges(pred_len: int, n_phases: int = HORIZON_PHASE_COUNT):
+    """Return list of (h_start, h_end) inclusive 1-based step-ahead indices per phase; empty phases -> (None, None)."""
+    splits = np.array_split(np.arange(pred_len), n_phases)
+    ranges = []
+    for part in splits:
+        if part.size == 0:
+            ranges.append((None, None))
+        else:
+            ranges.append((int(part[0]) + 1, int(part[-1]) + 1))
+    return ranges
+
+
+def trajectory_composite_loss_np(
+    pred: np.ndarray,
+    target: np.ndarray,
+    delta: float,
+    point_weight: float,
+    diff_weight: float,
+    curvature_weight: float,
+    variance_weight: float,
+    laplacian_reg_weight: float,
+    tail_weight: float,
+) -> float:
+    """Same weighted sum as TrajectoryAwareLoss (mean over batch). pred/target (N, L) normalized abs traj."""
+    pred = np.asarray(pred, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if pred.shape != target.shape:
+        raise ValueError(f"pred/target shape mismatch {pred.shape} vs {target.shape}")
+    _n, L = pred.shape
+    if L == 0:
+        return float("nan")
+
+    w = np.linspace(1.0, float(tail_weight), L, dtype=np.float64)
+    w = w / np.mean(w)
+
+    def weighted_huber(p: np.ndarray, t: np.ndarray, weights: np.ndarray) -> float:
+        if p.size == 0:
+            return 0.0
+        err = p - t
+        ae = np.abs(err)
+        huber = np.where(ae < delta, 0.5 * err**2, delta * (ae - 0.5 * delta))
+        return float(np.mean(huber * weights))
+
+    point_loss = weighted_huber(pred, target, w)
+
+    if L >= 2:
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        diff_weights = w[1:]
+        diff_loss = weighted_huber(pred_diff, target_diff, diff_weights)
+    else:
+        diff_loss = 0.0
+
+    if L >= 3:
+        pred_curvature = pred_diff[:, 1:] - pred_diff[:, :-1]
+        target_curvature = target_diff[:, 1:] - target_diff[:, :-1]
+        curvature_weights = w[2:]
+        curvature_loss = weighted_huber(pred_curvature, target_curvature, curvature_weights)
+    else:
+        curvature_loss = 0.0
+
+    pred_std = pred.std(axis=1, ddof=0)
+    target_std = target.std(axis=1, ddof=0)
+    variance_loss = float(np.mean(np.abs(pred_std - target_std)))
+
+    if laplacian_reg_weight > 0 and L >= 3:
+        d2_pred = pred[:, 2:] - 2.0 * pred[:, 1:-1] + pred[:, :-2]
+        laplacian_reg = float(np.mean(d2_pred**2))
+    else:
+        laplacian_reg = 0.0
+
+    return float(
+        point_weight * point_loss
+        + diff_weight * diff_loss
+        + curvature_weight * curvature_loss
+        + variance_weight * variance_loss
+        + laplacian_reg_weight * laplacian_reg
+    )
+
+
+def _loss_kwargs_from_args(args) -> dict:
+    return {
+        "delta": float(args.loss_huber_delta),
+        "point_weight": float(args.loss_point_weight),
+        "diff_weight": float(args.loss_diff_weight),
+        "curvature_weight": float(args.loss_curvature_weight),
+        "variance_weight": float(args.loss_variance_weight),
+        "laplacian_reg_weight": float(args.loss_laplacian_weight),
+        "tail_weight": float(args.loss_tail_weight),
+    }
+
+
+def compute_horizon_phase_composite_losses(
+    y_true_raw: np.ndarray,
+    y_pred_raw: np.ndarray,
+    train_mean: float,
+    train_std: float,
+    loss_kwargs: dict,
+    n_phases: int = HORIZON_PHASE_COUNT,
+):
+    """TrajectoryAware composite on each contiguous phase (normalized abs traj), pooled over windows."""
+    y_p = (np.asarray(y_pred_raw, dtype=np.float64) - train_mean) / train_std
+    y_t = (np.asarray(y_true_raw, dtype=np.float64) - train_mean) / train_std
+    n_steps = int(y_t.shape[1])
+    splits = np.array_split(np.arange(n_steps, dtype=np.int64), n_phases)
+    values = []
+    for part in splits:
+        if part.size == 0:
+            values.append(float("nan"))
+            continue
+        a, b = int(part[0]), int(part[-1]) + 1
+        values.append(trajectory_composite_loss_np(y_p[:, a:b], y_t[:, a:b], **loss_kwargs))
+    return values
+
+
+def compute_horizon_sliding_composite_losses(
+    y_true_raw: np.ndarray,
+    y_pred_raw: np.ndarray,
+    train_mean: float,
+    train_std: float,
+    loss_kwargs: dict,
+    window_size: int = 7,
+):
+    """Local composite loss centered at each step-ahead index (normalized traj); window length capped by pred_len."""
+    pred_len = int(y_true_raw.shape[1])
+    y_p = (y_pred_raw - train_mean) / train_std
+    y_t = (y_true_raw - train_mean) / train_std
+    W = min(window_size if window_size % 2 == 1 else window_size - 1, pred_len)
+    if W < 1:
+        W = 1
+    half = W // 2
+    out = []
+    for h in range(pred_len):
+        lo = max(0, min(h - half, pred_len - W))
+        hi = lo + W
+        out.append(trajectory_composite_loss_np(y_p[:, lo:hi], y_t[:, lo:hi], **loss_kwargs))
+    return out
+
+
+def horizon_phase_ranges_csv_string(ranges: list) -> str:
+    parts = [f"{lo}-{hi}" for lo, hi in ranges if lo is not None and hi is not None]
+    return ";".join(parts)
+
+
+def parse_timestamp_series(series: pd.Series, name: str) -> pd.Series:
+    """Parse TIMESTAMP the same way as ``plot_data_acceleration_rms_interactive_clean.ipynb`` (Excel-aligned).
+
+    Primary path: ``dayfirst=True, format="mixed"``. Remaining NaT rows fall back to strict
+    ISO and other formats so training scripts keep working on edge-case strings.
+    """
+    raw = series.astype(str).str.strip()
+    parsed = pd.to_datetime(raw, dayfirst=True, format="mixed", errors="coerce")
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            format="%Y-%m-%d %H:%M:%S",
+            errors="coerce",
+        )
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            format="%Y-%m-%d %H:%M",
+            errors="coerce",
+        )
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            format="%d/%m/%Y %H:%M",
+            errors="coerce",
+        )
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            dayfirst=True,
+            errors="coerce",
+        )
+
+    remaining_bad = parsed.isna()
+    if remaining_bad.any():
+        bad_examples = raw.loc[remaining_bad].head(5).tolist()
+        raise ValueError(
+            f"Failed to parse some TIMESTAMP values in {name}. "
+            f"Examples: {bad_examples}"
+        )
+
+    return parsed
+
+
+def summarize_timestamp_steps(
+    timestamps: pd.Series,
+    label: str,
+    nominal_seconds: float,
+    tolerance_seconds: float,
+) -> None:
+    """Print a short summary of inter-row TIMESTAMP gaps.
+
+    Helps diagnose why a uniform-timestep window filter accepts/rejects rows.
+    Reports median/mean/min/max step (seconds) and the share of consecutive
+    pairs whose step lies within ``nominal_seconds ± tolerance_seconds``.
+    """
+    ts = pd.Series(timestamps).reset_index(drop=True)
+    if len(ts) < 2:
+        print(f"  [step-stats:{label}] not enough rows for diff stats (n={len(ts)}).")
+        return
+    diffs_s = np.diff(ts.to_numpy(dtype="datetime64[ns]").astype("int64")) / 1e9
+    nominal = float(nominal_seconds)
+    tol = float(tolerance_seconds)
+    pct_within = 100.0 * float(np.mean(np.abs(diffs_s - nominal) <= tol))
+    try:
+        mode_val = float(pd.Series(np.round(diffs_s, 3)).mode().iloc[0])
+    except Exception:
+        mode_val = float("nan")
+    print(
+        f"  [step-stats:{label}] median={np.median(diffs_s):.3f}s mode={mode_val:.3f}s "
+        f"mean={diffs_s.mean():.3f}s min={diffs_s.min():.3f}s max={diffs_s.max():.3f}s | "
+        f"pairs within {nominal:g}±{tol:g}s = {pct_within:.2f}% (n_diffs={diffs_s.size})"
+    )
+
+
+def compute_timestep_window_start_indices(
+    timestamps: pd.Series,
+    span_len: int,
+    *,
+    nominal_seconds: Optional[float] = None,
+    tolerance_seconds: float = 1.01,
+    max_consecutive_gap_seconds: Optional[float] = None,
+) -> np.ndarray:
+    """Row indices ``i`` where the window ``[i, i + span_len)`` is allowed by timestamp rules.
+
+    - If ``nominal_seconds`` is set, each consecutive step must lie in
+      ``nominal_seconds ± tolerance_seconds`` (same as the legacy uniform filter).
+    - If ``max_consecutive_gap_seconds`` is set, each consecutive step must be **≤** that many
+      seconds (rejects windows that span a longer gap).
+    - If both are set, both must hold. If neither is set, every dense start index is returned.
+    """
+    ts = pd.Series(timestamps).reset_index(drop=True)
+    if span_len <= 0:
+        raise ValueError("span_len must be positive.")
+    n = len(ts)
+    if n < span_len:
+        return np.array([], dtype=np.int64)
+    if span_len == 1:
+        return np.arange(n, dtype=np.int64)
+
+    if nominal_seconds is None and max_consecutive_gap_seconds is None:
+        return np.arange(n - span_len + 1, dtype=np.int64)
+
+    values = ts.to_numpy(dtype="datetime64[ns]")
+    diffs_ns = np.diff(values.astype("int64"))
+
+    if nominal_seconds is None:
+        uniform_ok = np.ones(diffs_ns.shape[0], dtype=bool)
+    else:
+        nominal_ns = int(round(float(nominal_seconds) * 1e9))
+        tol_ns = int(round(float(tolerance_seconds) * 1e9))
+        uniform_ok = np.abs(diffs_ns - nominal_ns) <= tol_ns
+
+    if max_consecutive_gap_seconds is None:
+        gap_ok = np.ones(diffs_ns.shape[0], dtype=bool)
+    else:
+        max_ns = int(round(float(max_consecutive_gap_seconds) * 1e9))
+        gap_ok = diffs_ns <= max_ns
+
+    step_ok = uniform_ok & gap_ok
+    m = span_len - 1
+    if step_ok.size < m:
+        return np.array([], dtype=np.int64)
+    conv = np.convolve(step_ok.astype(np.int32), np.ones(m, dtype=np.int32), mode="valid")
+    return np.where(conv == m)[0].astype(np.int64)
+
+
+def window_start_index_kwargs_from_args(args, span_len: int) -> dict:
+    """Keyword bundle for :func:`compute_timestep_window_start_indices` from sweep CLI args."""
+    mg = getattr(args, "max_consecutive_timestamp_gap_seconds", None)
+    return {
+        "span_len": span_len,
+        "nominal_seconds": float(args.uniform_step_seconds) if args.require_uniform_timestep else None,
+        "tolerance_seconds": float(args.uniform_step_tolerance_seconds),
+        "max_consecutive_gap_seconds": float(mg) if mg is not None else None,
+    }
+
+
+def compute_uniform_timestep_start_indices(
+    timestamps: pd.Series,
+    span_len: int,
+    nominal_seconds: float = 5.0,
+    tolerance_seconds: float = 1.01,
+    max_consecutive_gap_seconds: Optional[float] = None,
+) -> np.ndarray:
+    """Indices ``i`` where every step in the window matches nominal ± tol (optional max gap cap).
+
+    Prefer :func:`compute_timestep_window_start_indices` when ``nominal_seconds`` may be disabled.
+    """
+    return compute_timestep_window_start_indices(
+        timestamps,
+        span_len,
+        nominal_seconds=nominal_seconds,
+        tolerance_seconds=tolerance_seconds,
+        max_consecutive_gap_seconds=max_consecutive_gap_seconds,
+    )
+
+
+def load_window_manifest(path: str) -> dict:
+    """Load purged dev window manifest (train/val starts into dev CSV)."""
+    abs_path = os.path.abspath(path)
+    if not os.path.isfile(abs_path):
+        raise FileNotFoundError(f"window manifest not found: {abs_path}")
+    with open(abs_path, encoding="utf-8") as fp:
+        data = json.load(fp)
+    for key in ("train_window_starts", "val_window_starts", "input_len", "pred_len"):
+        if key not in data:
+            raise ValueError(f"window manifest missing required key {key!r}: {abs_path}")
+    return data
+
+
+def row_indices_covered_by_windows(starts: np.ndarray, span: int, n_rows: int) -> np.ndarray:
+    """Sorted unique row indices touched by any window [s, s + span) for s in starts."""
+    starts = np.asarray(starts, dtype=np.int64)
+    if starts.size == 0:
+        return np.zeros(0, dtype=np.int64)
+    if starts.size >= 2 and np.all(np.diff(starts) == 1):
+        lo = int(starts[0])
+        hi = int(starts[-1]) + int(span)
+        return np.arange(lo, min(hi, n_rows), dtype=np.int64)
+    m = np.zeros(int(n_rows), dtype=bool)
+    for s in starts:
+        ss = int(s)
+        if ss < 0:
+            continue
+        m[ss : min(ss + int(span), n_rows)] = True
+    return np.flatnonzero(m)
+
+
+def _resolve_eval_window_stride(arg_stride: int, pred_len: int) -> int:
+    """0 or negative means use pred_len (non-overlapping eval steps in index space)."""
+    if arg_stride <= 0:
+        return max(1, int(pred_len))
+    return max(1, int(arg_stride))
+
+
+def subsample_window_starts(
+    starts: np.ndarray,
+    stride: int,
+    *,
+    split_name: str,
+) -> np.ndarray:
+    """Take every S-th start; stride<=1 leaves starts unchanged."""
+    s = int(stride)
+    if starts.size == 0:
+        return starts
+    if s <= 1:
+        return starts
+    out = starts[::s]
+    if out.size == 0:
+        raise ValueError(
+            f"{split_name}: window stride {s} removed all {starts.size} uniform starts; "
+            "use a shorter stride or more data."
+        )
+    return out.astype(np.int64, copy=False)
+
+
+def split_window_counts(
+    total: int,
+    train_ratio: float,
+    val_ratio: float,
+    test_ratio: float,
+    min_each: int = 1,
+) -> Tuple[int, int, int]:
+    """
+    Integer train/val/test window counts approximating the given ratios, summing to ``total``.
+    Each split receives at least ``min_each`` windows; remaining windows split by ratio.
+    """
+    if total < 3 * min_each:
+        raise ValueError(
+            f"Need at least {3 * min_each} valid windows for train/val/test (got {total})."
+        )
+    w = np.asarray([train_ratio, val_ratio, test_ratio], dtype=np.float64)
+    if np.any(w < 0):
+        raise ValueError("train/val/test ratios must be non-negative.")
+    ssum = float(w.sum())
+    if ssum <= 0:
+        raise ValueError("train/val/test ratios must sum to a positive value.")
+    w /= ssum
+    left = total - 3 * min_each
+    raw = left * w
+    extra = np.floor(raw).astype(int)
+    rem = left - int(extra.sum())
+    frac_order = np.argsort(-(raw - extra))
+    for k in range(rem):
+        extra[int(frac_order[k % 3])] += 1
+    parts = min_each + extra
+    sp = int(parts.sum())
+    if sp != total:
+        raise RuntimeError(f"split_window_counts internal error: sums to {sp} != {total}.")
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+class MultiStepDeltaDataset(Dataset):
+    def __init__(self, features_norm, target_norm, input_len, pred_len, sample_starts=None):
+        features_norm = np.asarray(features_norm, dtype=np.float32)
+        target_norm = np.asarray(target_norm, dtype=np.float32)
+        if features_norm.ndim != 2:
+            raise ValueError(f"features_norm must be 2D (time, n_features), got shape={features_norm.shape}")
+        if target_norm.ndim != 1:
+            raise ValueError(f"target_norm must be 1D (time,), got shape={target_norm.shape}")
+        if len(features_norm) != len(target_norm):
+            raise ValueError("features_norm and target_norm must have identical time length.")
+        self.input_len = input_len
+        self.pred_len = pred_len
+        tlen = len(target_norm)
+        span = input_len + pred_len
+
+        if sample_starts is None:
+            n_sliding = tlen - span + 1
+            if n_sliding <= 0:
+                raise ValueError("Series too short for given input_len and pred_len.")
+            self.sample_starts = np.arange(n_sliding, dtype=np.int64)
+        else:
+            self.sample_starts = np.asarray(sample_starts, dtype=np.int64)
+            if self.sample_starts.ndim != 1:
+                raise ValueError("sample_starts must be a 1D array of row indices.")
+            if self.sample_starts.size == 0:
+                raise ValueError(
+                    "No valid windows for this split (series too short or no window passes "
+                    "timestep filters; try --no-require-uniform-timestep or larger val/test CSV)."
+                )
+            if (self.sample_starts < 0).any() or ((self.sample_starts + span) > tlen).any():
+                raise ValueError(
+                    "sample_starts entries must satisfy 0 <= i and i + input_len + pred_len <= len(series)."
+                )
+
+        idx = self.sample_starts
+        x = np.stack([features_norm[i : i + input_len, :] for i in idx], axis=0).astype(np.float32)
+        x = np.transpose(x, (0, 2, 1))
+
+        future = np.stack(
+            [target_norm[i + input_len : i + input_len + pred_len] for i in idx],
+            axis=0,
+        ).astype(np.float32)
+
+        last_val = target_norm[idx + input_len - 1].astype(np.float32)[:, None]
+        y_delta = future - last_val
+
+        self.x = torch.tensor(x, dtype=torch.float32)
+        self.y = torch.tensor(y_delta, dtype=torch.float32)
+        self.last_val = torch.tensor(last_val, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx], self.last_val[idx]
+
+
+class TrajectoryAwareLoss(nn.Module):
+    def __init__(
+        self,
+        pred_len,
+        delta=1.0,
+        point_weight=0.4,
+        diff_weight=1.2,
+        curvature_weight=0.8,
+        variance_weight=0.4,
+        laplacian_reg_weight=0.0,
+        tail_weight=1.0,
+    ):
+        super().__init__()
+        self.delta = delta
+        self.point_weight = point_weight
+        self.diff_weight = diff_weight
+        self.curvature_weight = curvature_weight
+        self.variance_weight = variance_weight
+        self.laplacian_reg_weight = laplacian_reg_weight
+        self.tail_weight = float(tail_weight)
+        w = torch.linspace(1.0, self.tail_weight, pred_len, dtype=torch.float32)
+        self.register_buffer("w", w / w.mean())
+
+    def _weighted_huber(self, pred, target, weights):
+        err = pred - target
+        abs_err = err.abs()
+        huber = torch.where(
+            abs_err < self.delta,
+            0.5 * err ** 2,
+            self.delta * (abs_err - 0.5 * self.delta),
+        )
+        return (huber * weights).mean()
+
+    def forward(self, pred, target):
+        point_weights = self.w.to(pred.device)
+        point_loss = self._weighted_huber(pred, target, point_weights)
+
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        diff_weights = point_weights[1:]
+        diff_loss = self._weighted_huber(pred_diff, target_diff, diff_weights)
+
+        pred_curvature = pred_diff[:, 1:] - pred_diff[:, :-1]
+        target_curvature = target_diff[:, 1:] - target_diff[:, :-1]
+        curvature_weights = point_weights[2:]
+        curvature_loss = self._weighted_huber(pred_curvature, target_curvature, curvature_weights)
+
+        pred_std = pred.std(dim=1, unbiased=False)
+        target_std = target.std(dim=1, unbiased=False)
+        variance_loss = torch.mean(torch.abs(pred_std - target_std))
+
+        if self.laplacian_reg_weight > 0 and pred.size(1) >= 3:
+            d2_pred = pred[:, 2:] - 2.0 * pred[:, 1:-1] + pred[:, :-2]
+            laplacian_reg = (d2_pred ** 2).mean()
+        else:
+            laplacian_reg = pred.new_tensor(0.0)
+
+        return (
+            self.point_weight * point_loss
+            + self.diff_weight * diff_loss
+            + self.curvature_weight * curvature_loss
+            + self.variance_weight * variance_loss
+            + self.laplacian_reg_weight * laplacian_reg
+        )
+
+
+def _quantile_column_name(q: float) -> str:
+    s = f"{float(q):.6g}".replace(".", "p")
+    return f"predicted_q_{s}"
+
+
+def prediction_interval_band_label(quantiles) -> str:
+    if quantiles is None or len(quantiles) < 2:
+        return "Quantile band (low–high)"
+    lo, hi = float(quantiles[0]), float(quantiles[-1])
+    return f"~{100.0 * (hi - lo):.0f}% nominal band (q{lo:g}–q{hi:g})"
+
+
+def median_quantile_index(quantiles) -> int:
+    arr = np.asarray(quantiles, dtype=np.float64)
+    return int(np.argmin(np.abs(arr - 0.5)))
+
+
+class QuantileForecastLoss(nn.Module):
+    """Pinball loss per quantile on absolute (normalized) trajectories, shape (B, Q, L)."""
+
+    def __init__(self, pred_len: int, quantiles, tail_weight: float = 1.0):
+        super().__init__()
+        q = torch.tensor(list(quantiles), dtype=torch.float32)
+        if q.numel() < 2:
+            raise ValueError("forecast_quantiles must contain at least two levels.")
+        if not bool(torch.all(q[1:] >= q[:-1]).item()):
+            raise ValueError("forecast_quantiles must be sorted in ascending order (e.g. 0.05 0.5 0.95).")
+        self.register_buffer("quantiles", q)
+        tw = float(tail_weight)
+        w = torch.linspace(1.0, tw, pred_len, dtype=torch.float32)
+        self.register_buffer("w", w / w.mean())
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # pred, target: (B, Q, L)
+        err = target - pred
+        qv = self.quantiles.view(1, -1, 1).to(pred.device)
+        rho = torch.maximum(qv * err, (qv - 1.0) * err)
+        wt = self.w.view(1, 1, -1).to(pred.device)
+        return (rho * wt).mean()
+
+
+def run_epoch(model, loader, criterion, optimizer=None, device="cpu"):
+    training = optimizer is not None
+    model.train() if training else model.eval()
+
+    total_loss = 0.0
+    total_count = 0
+
+    with torch.set_grad_enabled(training):
+        for x, y_delta, last_val in loader:
+            x = x.to(device)
+            y_delta = y_delta.to(device)
+            last_val = last_val.to(device)
+
+            pred_delta = model(x)
+            if pred_delta.dim() == 3:
+                pred_abs = pred_delta + last_val.unsqueeze(1)
+                true_abs_1 = y_delta + last_val
+                true_abs = true_abs_1.unsqueeze(1).expand_as(pred_abs)
+            else:
+                pred_abs = pred_delta + last_val
+                true_abs = y_delta + last_val
+            loss = criterion(pred_abs, true_abs)
+
+            if training:
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+            batch_size = x.size(0)
+            total_loss += loss.item() * batch_size
+            total_count += batch_size
+
+    return total_loss / max(total_count, 1)
+
+
+def collect_predictions(model, loader, train_std, train_mean, device, forecast_quantiles=None):
+    all_preds_abs_norm = []
+    all_targets_abs_norm = []
+
+    model.eval()
+    with torch.no_grad():
+        for x, y_delta, last_val in loader:
+            x = x.to(device)
+            y_delta = y_delta.to(device)
+            last_val = last_val.to(device)
+
+            pred_delta = model(x)
+            if pred_delta.dim() == 3:
+                pred_abs_norm = pred_delta + last_val.unsqueeze(1)
+            else:
+                pred_abs_norm = pred_delta + last_val
+            true_abs_norm = y_delta + last_val
+
+            all_preds_abs_norm.append(pred_abs_norm.cpu().numpy())
+            all_targets_abs_norm.append(true_abs_norm.cpu().numpy())
+
+    all_preds_abs_norm = np.concatenate(all_preds_abs_norm, axis=0)
+    all_targets_abs_norm = np.concatenate(all_targets_abs_norm, axis=0)
+
+    all_preds_raw = all_preds_abs_norm * train_std + train_mean
+    all_targets_raw = all_targets_abs_norm * train_std + train_mean
+
+    if forecast_quantiles is None:
+        return all_preds_raw, all_targets_raw, None
+    mi = median_quantile_index(forecast_quantiles)
+    return all_preds_raw[:, mi, :], all_targets_raw, all_preds_raw
+
+
+def compute_window_rmse(model, loader, train_std, train_mean, device, forecast_quantiles=None):
+    preds_raw, targets_raw, _ = collect_predictions(
+        model, loader, train_std, train_mean, device, forecast_quantiles=forecast_quantiles
+    )
+    window_rmse = np.sqrt(np.mean((targets_raw - preds_raw) ** 2, axis=1))
+    return float(window_rmse.mean())
+
+
+def baseline_rmse(test_loader, pred_len, train_std, train_mean):
+    baseline_preds_abs_norm = []
+    baseline_targets_abs_norm = []
+
+    for x, y_delta, last_val in test_loader:
+        y_delta_np = y_delta.numpy()
+        last_val_np = last_val.numpy()
+
+        pred_abs_norm = np.repeat(last_val_np, pred_len, axis=1)
+        true_abs_norm = y_delta_np + last_val_np
+
+        baseline_preds_abs_norm.append(pred_abs_norm)
+        baseline_targets_abs_norm.append(true_abs_norm)
+
+    baseline_preds_raw = np.concatenate(baseline_preds_abs_norm, axis=0) * train_std + train_mean
+    baseline_targets_raw = np.concatenate(baseline_targets_abs_norm, axis=0) * train_std + train_mean
+    return rmse_np(baseline_targets_raw, baseline_preds_raw)
+
+
+def save_plot(path, title, x_label, y_label, x, y1, y1_label, y2=None, y2_label=None, rotate_dates=False):
+    plt.figure(figsize=(10, 4))
+    plt.plot(x, y1, label=y1_label)
+    if y2 is not None:
+        plt.plot(x, y2, label=y2_label)
+    plt.title(title)
+    plt.xlabel(x_label)
+    plt.ylabel(y_label)
+    plt.legend()
+    plt.grid(True)
+    if rotate_dates:
+        plt.gcf().autofmt_xdate()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def build_horizon_forecast_dataframe(timestamps, actual, predicted, horizon):
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps.astype(str).to_list(),
+            "horizon": [horizon] * len(actual),
+            "actual": actual,
+            "predicted": predicted,
+        }
+    )
+
+
+def _forecast_smoothing_caption(pred_smoothing_window: int) -> str:
+    if pred_smoothing_window <= 1:
+        return "No post-smoothing (pred-smoothing-window = 1)"
+    return f"Post-smoothing applied (pred-smoothing-window = {pred_smoothing_window})"
+
+
+def evenly_spaced_window_indices(n_windows: int, k: int) -> Set[int]:
+    """Up to k indices in [0, n_windows-1], equally spaced (endpoints included when k >= 2)."""
+    if n_windows <= 0 or k <= 0:
+        return set()
+    if n_windows <= k:
+        return set(range(n_windows))
+    if k == 1:
+        return {0}
+    out = {int(round(i * (n_windows - 1) / (k - 1))) for i in range(k)}
+    return out
+
+
+def _plot_rolling_window_png(
+    window_idx: int,
+    input_len: int,
+    pred_len: int,
+    history_series_raw: np.ndarray,
+    targets_row: np.ndarray,
+    preds_row: np.ndarray,
+    y_axis_label: str,
+    path: str,
+    dpi: int = 140,
+    input_row_start: Optional[int] = None,
+    input_context_label: str = "Acceleration RMS",
+    pred_smoothing_window: int = 1,
+    hist_timestamps: Optional[pd.Series] = None,
+    fore_timestamps: Optional[pd.Series] = None,
+    preds_low_row: Optional[np.ndarray] = None,
+    preds_high_row: Optional[np.ndarray] = None,
+    interval_label: str = "80% pred. interval",
+):
+    """Input history, horizon actual, and horizon predicted on one y-scale (raw target units)."""
+
+    row0 = window_idx if input_row_start is None else int(input_row_start)
+    hist = np.asarray(history_series_raw[row0 : row0 + input_len], dtype=np.float64)
+    use_ts = (
+        hist_timestamps is not None
+        and fore_timestamps is not None
+        and len(hist_timestamps) == input_len
+        and len(fore_timestamps) == pred_len
+    )
+    if use_ts:
+        x_hist = pd.to_datetime(hist_timestamps, errors="coerce").reset_index(drop=True)
+        x_fore = pd.to_datetime(fore_timestamps, errors="coerce").reset_index(drop=True)
+        t_last_in = pd.Timestamp(x_hist.iloc[-1])
+        t_first_out = pd.Timestamp(x_fore.iloc[0])
+        boundary_x = t_last_in + (t_first_out - t_last_in) / 2
+    else:
+        x_hist = np.arange(0, input_len, dtype=np.float64)
+        x_fore = np.arange(input_len, input_len + pred_len, dtype=np.float64)
+        boundary_x = float(input_len - 0.5)
+
+    w_in = max(10.0, min(22.0, 6.0 + 0.004 * float(input_len + pred_len)))
+    fig, ax = plt.subplots(1, 1, figsize=(w_in, 3.8))
+
+    ax.axvline(x=boundary_x, color="0.55", linestyle="--", linewidth=1.2, zorder=1)
+    ax.plot(
+        x_hist,
+        hist,
+        linewidth=0.95,
+        alpha=0.85,
+        color="0.35",
+        label=f"{input_context_label} — input",
+        zorder=2,
+    )
+
+    ax.plot(x_fore, targets_row, color="C0", linewidth=1.3, label="Actual target", zorder=4)
+    if (
+        preds_low_row is not None
+        and preds_high_row is not None
+        and len(preds_low_row) == pred_len
+        and len(preds_high_row) == pred_len
+    ):
+        lo = np.asarray(preds_low_row, dtype=np.float64)
+        hi = np.asarray(preds_high_row, dtype=np.float64)
+        ax.fill_between(
+            x_fore,
+            lo,
+            hi,
+            color="C1",
+            alpha=0.22,
+            label=interval_label,
+            zorder=3,
+        )
+    ax.plot(x_fore, preds_row, color="C1", linewidth=1.1, label="Predicted (median)", zorder=4)
+    ax.set_title(
+        f"Window {window_idx} — {input_context_label} input + forecast ({pred_len}-step)\n"
+        f"{_forecast_smoothing_caption(pred_smoothing_window)}",
+        fontsize=10,
+    )
+    ax.set_ylabel(y_axis_label)
+    if use_ts:
+        ax.set_xlabel("Timestamp (left: input context | right: forecast horizon)")
+        fig.autofmt_xdate()
+    else:
+        ax.set_xlabel(
+            f"Step index (0-{input_len - 1}: input context | {input_len}-{input_len + pred_len - 1}: horizon)"
+        )
+    ax.grid(True, alpha=0.35)
+    h, leg_labels = ax.get_legend_handles_labels()
+    max_entries = min(len(h), 8)
+    ax.legend(h[:max_entries], leg_labels[:max_entries], loc="upper left", fontsize=7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=dpi)
+    plt.close(fig)
+
+
+def _stitched_plot_gap_threshold(
+    ts_series: pd.Series,
+    max_consecutive_gap_seconds: Optional[float] = None,
+) -> pd.Timedelta:
+    """Break plot lines when Δt exceeds allowed consecutive gap (same idea as window filtering)."""
+    if max_consecutive_gap_seconds is not None and float(max_consecutive_gap_seconds) > 0:
+        return pd.Timedelta(seconds=float(max_consecutive_gap_seconds) * 1.01)
+    if ts_series is None or len(ts_series) < 2:
+        return pd.Timedelta(hours=1)
+    diff = pd.to_datetime(ts_series, errors="coerce").diff()
+    secs = diff.dt.total_seconds().to_numpy(dtype=np.float64)[1:]
+    secs = secs[np.isfinite(secs) & (secs > 0)]
+    if secs.size == 0:
+        return pd.Timedelta(hours=1)
+    med = float(np.nanmedian(secs))
+    return pd.Timedelta(seconds=max(med * 2.0, 300.0))
+
+
+def _split_xy_at_time_gaps(
+    x_list: list,
+    y_list: list,
+    gap_threshold: pd.Timedelta,
+) -> list[tuple[list, list]]:
+    """Split (x, y) into contiguous segments; no line is drawn across a gap larger than gap_threshold."""
+    if not x_list or len(x_list) != len(y_list):
+        return []
+    segments: list[tuple[list, list]] = []
+    seg_x: list = []
+    seg_y: list = []
+    for i in range(len(x_list)):
+        if i > 0:
+            dt = pd.Timestamp(x_list[i]) - pd.Timestamp(x_list[i - 1])
+            if dt > gap_threshold:
+                if seg_x:
+                    segments.append((seg_x, seg_y))
+                seg_x = []
+                seg_y = []
+        seg_x.append(x_list[i])
+        seg_y.append(y_list[i])
+    if seg_x:
+        segments.append((seg_x, seg_y))
+    return segments
+
+
+def _plotly_add_line_segments(
+    fig,
+    segments: list[tuple[list, list]],
+    *,
+    name: str,
+    line: dict,
+    legendgroup: Optional[str] = None,
+) -> None:
+    import plotly.graph_objects as go
+
+    grp = legendgroup or name
+    for i, (xs, ys) in enumerate(segments):
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines",
+                name=name,
+                legendgroup=grp,
+                showlegend=(i == 0),
+                connectgaps=False,
+                line=line,
+            )
+        )
+
+
+def _plotly_add_band_segments(
+    fig,
+    segments: list[tuple[list, list, list]],
+    *,
+    name: str,
+    fillcolor: str,
+) -> None:
+    """segments: list of (x, y_lo, y_hi) per contiguous time run."""
+    import plotly.graph_objects as go
+
+    for i, (xs, y_lo, y_hi) in enumerate(segments):
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=y_hi,
+                mode="lines",
+                line=dict(width=0),
+                legendgroup=name,
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=y_lo,
+                mode="lines",
+                line=dict(width=0),
+                fillcolor=fillcolor,
+                fill="tonexty",
+                name=name,
+                legendgroup=name,
+                showlegend=(i == 0),
+                hoverinfo="skip",
+            )
+        )
+
+
+def save_stitched_test_forecast_html(
+    html_path: str,
+    timestamps: pd.Series,
+    window_starts: np.ndarray,
+    input_len: int,
+    pred_len: int,
+    history_series_raw: np.ndarray,
+    preds_raw: np.ndarray,
+    targets_raw: np.ndarray,
+    y_axis_label: str,
+    input_context_label: str,
+    pred_smoothing_window: int,
+    preds_quantiles_raw: Optional[np.ndarray] = None,
+    forecast_quantiles: Optional[list] = None,
+    prediction_interval_label: str = "Quantile band (low–high)",
+    max_consecutive_gap_seconds: Optional[float] = None,
+) -> Optional[str]:
+    """One interactive HTML: first window input (actual) + stitched test horizons on real time axis."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:
+        print(f"save_stitched_test_forecast_html: skipping ({exc}); install plotly to enable.")
+        return None
+
+    starts = np.asarray(window_starts, dtype=np.int64).reshape(-1)
+    n_windows = int(preds_raw.shape[0])
+    if n_windows <= 0 or starts.size != n_windows:
+        print("save_stitched_test_forecast_html: no test windows; skip.")
+        return None
+
+    ts_all = pd.to_datetime(timestamps, errors="coerce").reset_index(drop=True)
+    n_rows = int(len(ts_all))
+    history = np.asarray(history_series_raw, dtype=np.float64).reshape(-1)
+    if history.shape[0] < n_rows:
+        print(
+            f"save_stitched_test_forecast_html: history length {history.shape[0]} < timestamps {n_rows}; skip."
+        )
+        return None
+
+    row0 = int(starts[0])
+    if row0 < 0 or row0 + input_len > n_rows:
+        print(f"save_stitched_test_forecast_html: invalid first window start {row0}; skip.")
+        return None
+
+    x_in = ts_all.iloc[row0 : row0 + input_len]
+    y_in = history[row0 : row0 + input_len]
+
+    rows = []
+    for w in range(n_windows):
+        si = int(starts[w])
+        for h in range(pred_len):
+            ri = si + input_len + h
+            if ri < 0 or ri >= n_rows:
+                continue
+            entry = {
+                "ts": ts_all.iloc[ri],
+                "actual": float(targets_raw[w, h]),
+                "pred": float(preds_raw[w, h]),
+                "lo": float("nan"),
+                "hi": float("nan"),
+            }
+            if preds_quantiles_raw is not None and forecast_quantiles is not None:
+                pq = preds_quantiles_raw[w]
+                if pq.ndim == 2 and pq.shape[0] >= 2 and pq.shape[1] == pred_len:
+                    entry["lo"] = float(pq[0, h])
+                    entry["hi"] = float(pq[-1, h])
+            rows.append(entry)
+
+    if not rows:
+        print("save_stitched_test_forecast_html: empty forecast rows; skip.")
+        return None
+
+    fd = pd.DataFrame(rows)
+    n_before = len(fd)
+    fd = fd.groupby("ts", sort=False, as_index=False).last().sort_values("ts").reset_index(drop=True)
+    n_after = len(fd)
+    collapsed = n_before > n_after
+
+    xf = fd["ts"].tolist()
+    ya = fd["actual"].astype(float).tolist()
+    yp = fd["pred"].astype(float).tolist()
+    y_lo = fd["lo"].astype(float).tolist()
+    y_hi = fd["hi"].astype(float).tolist()
+    has_band = bool(
+        preds_quantiles_raw is not None
+        and forecast_quantiles is not None
+        and len(forecast_quantiles) >= 2
+        and np.any(np.isfinite(np.asarray(y_lo)))
+        and np.any(np.isfinite(np.asarray(y_hi)))
+    )
+
+    gap_thr = _stitched_plot_gap_threshold(
+        x_in if len(x_in) >= 2 else fd["ts"],
+        max_consecutive_gap_seconds=max_consecutive_gap_seconds,
+    )
+    in_segments = _split_xy_at_time_gaps(x_in.tolist(), y_in.tolist(), gap_thr)
+    actual_segments = _split_xy_at_time_gaps(xf, ya, gap_thr)
+    pred_segments = _split_xy_at_time_gaps(xf, yp, gap_thr)
+    band_segments: list[tuple[list, list, list]] = []
+    if has_band:
+        lo_parts = _split_xy_at_time_gaps(xf, y_lo, gap_thr)
+        hi_parts = _split_xy_at_time_gaps(xf, y_hi, gap_thr)
+        for (xs_lo, ys_lo), (xs_hi, ys_hi) in zip(lo_parts, hi_parts):
+            band_segments.append((xs_lo, ys_lo, ys_hi))
+
+    t_last_in = pd.Timestamp(x_in.iloc[-1])
+    t_first_out = pd.Timestamp(xf[0])
+    boundary_x = t_last_in + (t_first_out - t_last_in) / 2
+    show_boundary = (t_first_out - t_last_in) <= gap_thr
+
+    fig = go.Figure()
+    _plotly_add_line_segments(
+        fig,
+        in_segments,
+        name=f"{input_context_label} — input",
+        line=dict(color="rgba(90, 90, 90, 0.95)", width=1.1),
+    )
+    if has_band:
+        _plotly_add_band_segments(
+            fig,
+            band_segments,
+            name=prediction_interval_label,
+            fillcolor="rgba(255, 165, 0, 0.22)",
+        )
+    _plotly_add_line_segments(
+        fig,
+        actual_segments,
+        name="Actual target",
+        line=dict(color="#1f77b4", width=1.35),
+    )
+    _plotly_add_line_segments(
+        fig,
+        pred_segments,
+        name="Predicted (median)",
+        line=dict(color="#ff7f0e", width=1.15),
+    )
+
+    subtitle = _forecast_smoothing_caption(pred_smoothing_window)
+    _gap_h = gap_thr.total_seconds() / 3600.0
+    _gap_rule = (
+        f"max consecutive TIMESTAMP gap ({max_consecutive_gap_seconds:g}s)"
+        if max_consecutive_gap_seconds
+        else "2× median Δt (≥5 min)"
+    )
+    subtitle += (
+        f"<br><span style='font-size:11px'>Each line/band segment is drawn only where consecutive timestamps are "
+        f"≤ {_gap_h:.2f}h apart ({_gap_rule}); no connectors across longer empty periods.</span>"
+    )
+    if collapsed:
+        subtitle += (
+            f"<br><span style='font-size:11px'>Overlapping test windows: "
+            f"{n_before} horizon points → {n_after} unique timestamps (last window kept per time).</span>"
+        )
+
+    if show_boundary:
+        fig.add_vline(x=boundary_x, line_dash="dash", line_color="rgba(120,120,120,0.95)", line_width=1.2)
+    fig.update_layout(
+        title=(
+            f"Stitched test set — {input_context_label} input + concatenated horizons ({pred_len}-step)<br>"
+            f"<sup>{subtitle}</sup>"
+        ),
+        xaxis_title="Timestamp (left: input context | right: forecast horizon)",
+        yaxis_title=y_axis_label,
+        hovermode="x unified",
+        template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, font=dict(size=10)),
+        margin=dict(t=100, l=60, r=30, b=70),
+    )
+
+    os.makedirs(os.path.dirname(os.path.abspath(html_path)), exist_ok=True)
+    fig.write_html(html_path, include_plotlyjs=True)
+    print(f"Saved stitched interactive test plot: {html_path}")
+    return html_path
+
+
+def save_rolling_window_forecasts(
+    output_dir,
+    preds_raw,
+    targets_raw,
+    timestamps,
+    input_len,
+    pred_len,
+    save_plots=True,
+    max_per_window_artifacts: Optional[int] = None,
+    y_axis_label: str = "Value",
+    history_series_raw: Optional[np.ndarray] = None,
+    window_input_row_starts: Optional[np.ndarray] = None,
+    input_context_label: str = "Acceleration RMS",
+    pred_smoothing_window: int = 1,
+    preds_quantiles_raw: Optional[np.ndarray] = None,
+    forecast_quantiles: Optional[list] = None,
+    prediction_interval_label: str = "Quantile band (low–high)",
+):
+    windows_dir = os.path.join(output_dir, "rolling_window_forecasts")
+    plots_dir = os.path.join(windows_dir, "plots")
+    csv_dir = os.path.join(windows_dir, "csv")
+    os.makedirs(plots_dir, exist_ok=True)
+    os.makedirs(csv_dir, exist_ok=True)
+
+    all_rows = []
+    n_windows = preds_raw.shape[0]
+    if window_input_row_starts is None:
+        input_starts = np.arange(n_windows, dtype=np.int64)
+    else:
+        input_starts = np.asarray(window_input_row_starts, dtype=np.int64).reshape(-1)
+        if input_starts.shape[0] != n_windows:
+            raise ValueError(
+                f"window_input_row_starts length {input_starts.shape[0]} != n_windows {n_windows}"
+            )
+
+    if max_per_window_artifacts is None or max_per_window_artifacts <= 0:
+        save_indices = set(range(n_windows))
+    else:
+        save_indices = evenly_spaced_window_indices(n_windows, max_per_window_artifacts)
+
+    if (
+        max_per_window_artifacts is not None
+        and max_per_window_artifacts > 0
+        and n_windows > len(save_indices)
+    ):
+        print(
+            f"Rolling-window artifacts: writing {len(save_indices)} per-window CSV/PNG files "
+            f"(evenly spaced over {n_windows} windows). Full series in all_windows_forecasts.csv."
+        )
+
+    for window_idx in range(n_windows):
+        row0 = int(input_starts[window_idx])
+        start_idx = row0 + input_len
+        ts_window = timestamps.iloc[start_idx : start_idx + pred_len]
+
+        col_dict = {
+            "window_index": [window_idx] * pred_len,
+            "step_ahead": np.arange(1, pred_len + 1),
+            "timestamp": ts_window.astype(str).to_list(),
+            "actual": targets_raw[window_idx],
+            "predicted": preds_raw[window_idx],
+        }
+        preds_low_row = None
+        preds_high_row = None
+        if preds_quantiles_raw is not None and forecast_quantiles is not None:
+            pq = preds_quantiles_raw[window_idx]
+            for qi, qv in enumerate(forecast_quantiles):
+                col_dict[_quantile_column_name(qv)] = pq[qi]
+            preds_low_row = np.asarray(pq[0], dtype=np.float32)
+            preds_high_row = np.asarray(pq[-1], dtype=np.float32)
+
+        window_df = pd.DataFrame(col_dict)
+
+        if window_idx in save_indices:
+            window_csv_path = os.path.join(csv_dir, f"window_{window_idx:06d}.csv")
+            window_df.to_csv(window_csv_path, index=False)
+
+        all_rows.append(window_df)
+
+        if save_plots and window_idx in save_indices:
+            window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
+            if history_series_raw is not None:
+                need_len = (
+                    preds_raw.shape[0] + input_len + pred_len - 1
+                    if window_input_row_starts is None
+                    else int(np.max(input_starts)) + input_len + pred_len
+                )
+                if len(history_series_raw) < need_len:
+                    raise ValueError(
+                        f"history_series_raw length {len(history_series_raw)} < required {need_len} "
+                        f"for rolling plots (windows={preds_raw.shape[0]}, input_len={input_len}, pred_len={pred_len})."
+                    )
+                ts_hist = timestamps.iloc[row0 : row0 + input_len].reset_index(drop=True)
+                ts_fore = timestamps.iloc[start_idx : start_idx + pred_len].reset_index(drop=True)
+                _plot_rolling_window_png(
+                    window_idx=window_idx,
+                    input_len=input_len,
+                    pred_len=pred_len,
+                    history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
+                    targets_row=np.asarray(window_df["actual"], dtype=np.float32),
+                    preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
+                    y_axis_label=y_axis_label,
+                    path=window_plot_path,
+                    input_row_start=row0,
+                    input_context_label=input_context_label,
+                    pred_smoothing_window=pred_smoothing_window,
+                    hist_timestamps=ts_hist,
+                    fore_timestamps=ts_fore,
+                    preds_low_row=preds_low_row,
+                    preds_high_row=preds_high_row,
+                    interval_label=prediction_interval_label,
+                )
+            else:
+                plt.figure(figsize=(8, 3))
+                if preds_low_row is not None and preds_high_row is not None:
+                    plt.fill_between(
+                        window_df["step_ahead"],
+                        preds_low_row,
+                        preds_high_row,
+                        alpha=0.25,
+                        color="C1",
+                        label=prediction_interval_label,
+                    )
+                plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
+                plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted (median)")
+                plt.title(
+                    f"Window {window_idx} Forecast ({pred_len}-step)\n"
+                    f"{_forecast_smoothing_caption(pred_smoothing_window)}"
+                )
+                plt.xlabel("Step Ahead")
+                plt.ylabel(y_axis_label)
+                plt.legend()
+                plt.grid(True)
+                plt.tight_layout()
+                plt.savefig(window_plot_path, dpi=140)
+                plt.close()
+
+    combined_df = pd.concat(all_rows, ignore_index=True)
+    combined_csv_path = os.path.join(windows_dir, "all_windows_forecasts.csv")
+    combined_df.to_csv(combined_csv_path, index=False)
+
+    if save_plots:
+        expected_plots = len(save_indices)
+        generated_plot_count = len(
+            [name for name in os.listdir(plots_dir) if name.startswith("window_") and name.endswith(".png")]
+        )
+        if generated_plot_count < expected_plots:
+            print(
+                f"Detected only {generated_plot_count}/{expected_plots} rolling-window PNGs under {plots_dir}. "
+                "Regenerating missing plots before exit."
+            )
+            for window_df in all_rows:
+                window_idx = int(window_df["window_index"].iloc[0])
+                if window_idx not in save_indices:
+                    continue
+                window_plot_path = os.path.join(plots_dir, f"window_{window_idx:06d}.png")
+                if os.path.isfile(window_plot_path):
+                    continue
+
+                if history_series_raw is not None:
+                    wix = int(window_df["window_index"].iloc[0])
+                    rs = int(input_starts[wix])
+                    sidx = rs + input_len
+                    ts_hist = timestamps.iloc[rs : rs + input_len].reset_index(drop=True)
+                    ts_fore = timestamps.iloc[sidx : sidx + pred_len].reset_index(drop=True)
+                    reg_lo = reg_hi = None
+                    if forecast_quantiles and len(forecast_quantiles) >= 2:
+                        c0 = _quantile_column_name(forecast_quantiles[0])
+                        c1 = _quantile_column_name(forecast_quantiles[-1])
+                        if c0 in window_df.columns and c1 in window_df.columns:
+                            reg_lo = window_df[c0].to_numpy(dtype=np.float32)
+                            reg_hi = window_df[c1].to_numpy(dtype=np.float32)
+                    _plot_rolling_window_png(
+                        window_idx=wix,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        history_series_raw=np.asarray(history_series_raw, dtype=np.float32),
+                        targets_row=np.asarray(window_df["actual"], dtype=np.float32),
+                        preds_row=np.asarray(window_df["predicted"], dtype=np.float32),
+                        y_axis_label=y_axis_label,
+                        path=window_plot_path,
+                        input_row_start=rs,
+                        input_context_label=input_context_label,
+                        pred_smoothing_window=pred_smoothing_window,
+                        hist_timestamps=ts_hist,
+                        fore_timestamps=ts_fore,
+                        preds_low_row=reg_lo,
+                        preds_high_row=reg_hi,
+                        interval_label=prediction_interval_label,
+                    )
+                else:
+                    e_lo = e_hi = None
+                    if forecast_quantiles and len(forecast_quantiles) >= 2:
+                        c0 = _quantile_column_name(forecast_quantiles[0])
+                        c1 = _quantile_column_name(forecast_quantiles[-1])
+                        if c0 in window_df.columns and c1 in window_df.columns:
+                            e_lo = window_df[c0].to_numpy(dtype=np.float32)
+                            e_hi = window_df[c1].to_numpy(dtype=np.float32)
+                    plt.figure(figsize=(8, 3))
+                    if e_lo is not None and e_hi is not None:
+                        plt.fill_between(
+                            window_df["step_ahead"],
+                            e_lo,
+                            e_hi,
+                            alpha=0.25,
+                            color="C1",
+                            label=prediction_interval_label,
+                        )
+                    plt.plot(window_df["step_ahead"], window_df["actual"], label="Actual")
+                    plt.plot(window_df["step_ahead"], window_df["predicted"], label="Predicted (median)")
+                    plt.title(
+                        f"Window {window_idx} Forecast ({pred_len}-step)\n"
+                        f"{_forecast_smoothing_caption(pred_smoothing_window)}"
+                    )
+                    plt.xlabel("Step Ahead")
+                    plt.ylabel(y_axis_label)
+                    plt.legend()
+                    plt.grid(True)
+                    plt.tight_layout()
+                    plt.savefig(window_plot_path, dpi=140)
+                    plt.close()
+
+            final_plot_count = len(
+                [name for name in os.listdir(plots_dir) if name.startswith("window_") and name.endswith(".png")]
+            )
+            print(f"Rolling-window PNGs available: {final_plot_count}/{expected_plots}")
+
+    return windows_dir, combined_csv_path
+
+
+def run_sweep(
+    args,
+    model_factory: Callable[[int, int, object, torch.device], nn.Module],
+    model_config_factory: Callable[[object, int, int], Dict],
+):
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    set_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+    print(f"Output directory (this process): {os.path.abspath(args.output_dir)}")
+
+    tr_path = args.train_csv
+    va_path = args.val_csv
+    manifest_path = getattr(args, "window_manifest", None)
+    manifest_mode = manifest_path is not None
+    if manifest_mode:
+        if tr_path is None or args.test_csv is None:
+            raise ValueError("--window-manifest requires --train-csv (dev) and --test-csv (holdout).")
+        if va_path is not None:
+            raise ValueError("With --window-manifest, omit --val-csv (val windows come from the manifest).")
+        if args.single_csv is not None:
+            raise ValueError("Use either --single-csv or --window-manifest, not both.")
+    elif (tr_path is None) ^ (va_path is None):
+        raise ValueError("Set both --train-csv and --val-csv, or neither (use --train-val-csv for train+val).")
+    explicit_tv = tr_path is not None and va_path is not None and not manifest_mode
+    single_file_mode = args.single_csv is not None
+
+    if single_file_mode and (explicit_tv or manifest_mode):
+        raise ValueError("Use either --single-csv or (--train-csv [+ --val-csv | --window-manifest]), not both.")
+    if single_file_mode:
+        df_all = pd.read_csv(args.single_csv)
+        df_all["TIMESTAMP"] = parse_timestamp_series(df_all["TIMESTAMP"], args.single_csv)
+        df_all = df_all.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_test = df_all
+        df_train_val = None
+        df_train = None
+        df_val = None
+        rte_resolve = (
+            args.test_ratio if args.test_ratio is not None else (1.0 - args.train_ratio - args.val_ratio)
+        )
+        ssum = float(args.train_ratio + args.val_ratio + rte_resolve)
+        if abs(ssum - 1.0) > 2e-3:
+            raise ValueError(
+                f"--train-ratio, --val-ratio, and --test-ratio (or implied test) must sum to 1; got {ssum:.6f}."
+            )
+        setattr(args, "test_ratio_resolved", float(rte_resolve))
+        print(
+            f"Single-CSV split (window counts): train={args.train_ratio:.4f}, val={args.val_ratio:.4f}, "
+            f"test={rte_resolve:.4f}"
+        )
+    elif manifest_mode:
+        manifest = load_window_manifest(manifest_path)
+        setattr(args, "_window_manifest", manifest)
+        df_train = pd.read_csv(tr_path)
+        df_train["TIMESTAMP"] = parse_timestamp_series(df_train["TIMESTAMP"], tr_path)
+        df_train = df_train.sort_values("TIMESTAMP").reset_index(drop=True)
+        _same_series = bool(manifest.get("same_series_test")) or (
+            os.path.normpath(os.path.abspath(tr_path))
+            == os.path.normpath(os.path.abspath(args.test_csv))
+        )
+        setattr(args, "_manifest_same_series_test", _same_series)
+        if _same_series:
+            df_test = df_train
+        else:
+            df_test = pd.read_csv(args.test_csv)
+            df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+            df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_val = None
+        df_train_val = None
+        df_all = None
+    elif explicit_tv:
+        df_test = pd.read_csv(args.test_csv)
+        df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+        df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_train = pd.read_csv(tr_path)
+        df_val = pd.read_csv(va_path)
+        df_train["TIMESTAMP"] = parse_timestamp_series(df_train["TIMESTAMP"], tr_path)
+        df_val["TIMESTAMP"] = parse_timestamp_series(df_val["TIMESTAMP"], va_path)
+        df_train = df_train.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_val = df_val.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_train_val = None
+        df_all = None
+    else:
+        df_all = None
+        df_train = df_val = None
+        df_test = pd.read_csv(args.test_csv)
+        df_test["TIMESTAMP"] = parse_timestamp_series(df_test["TIMESTAMP"], args.test_csv)
+        df_test = df_test.sort_values("TIMESTAMP").reset_index(drop=True)
+        df_train_val = pd.read_csv(args.train_val_csv)
+        df_train_val["TIMESTAMP"] = parse_timestamp_series(df_train_val["TIMESTAMP"], args.train_val_csv)
+        df_train_val = df_train_val.sort_values("TIMESTAMP").reset_index(drop=True)
+
+    vc = args.value_column
+
+    def _frames_iter():
+        if single_file_mode:
+            yield ("data", df_all, args.single_csv)
+        elif manifest_mode:
+            yield ("series", df_train, tr_path)
+            if not getattr(args, "_manifest_same_series_test", False):
+                yield ("holdout", df_test, args.test_csv)
+        elif explicit_tv:
+            yield ("train", df_train, tr_path)
+            yield ("val", df_val, va_path)
+            yield ("test", df_test, args.test_csv)
+        else:
+            yield ("train_val", df_train_val, args.train_val_csv)
+            yield ("test", df_test, args.test_csv)
+
+    for label, frame, csv_path in _frames_iter():
+        if vc not in frame.columns:
+            raise ValueError(
+                f"Value column {vc!r} not found in {label} CSV {csv_path!r}. "
+                f"Columns: {list(frame.columns)}. Pass --value-column with an existing column name."
+            )
+
+    if single_file_mode:
+        ref_frame = df_all
+    elif explicit_tv or manifest_mode:
+        ref_frame = df_train
+    else:
+        ref_frame = df_train_val
+    if args.use_all_numeric_features:
+        ignore_cols = {"TIMESTAMP", "Acceleration RMS (smoothed)"}
+        feature_cols = [
+            c
+            for c in ref_frame.columns
+            if c not in ignore_cols and pd.api.types.is_numeric_dtype(ref_frame[c])
+        ]
+    elif args.feature_columns:
+        feature_cols = list(args.feature_columns)
+    else:
+        feature_cols = [vc]
+
+    for label, frame, csv_path in _frames_iter():
+        missing = [c for c in feature_cols if c not in frame.columns]
+        if missing:
+            raise ValueError(
+                f"Feature columns missing in {label} CSV {csv_path!r}: {missing}. "
+                f"Available columns: {list(frame.columns)}"
+            )
+
+    tw_pre = int(getattr(args, "target_smoothing_window", 1))
+    if tw_pre > 1:
+        w_pre = tw_pre
+        print(
+            f"Target pre-smoothing: causal (trailing) MA window={w_pre} on {vc!r} "
+            "(per CSV, applied before train/val/test windows)."
+        )
+
+        def _smooth_value_col(df: pd.DataFrame) -> None:
+            df[vc] = smooth_target_series_1d(df[vc].to_numpy(dtype=np.float32), w_pre)
+
+        if single_file_mode:
+            _smooth_value_col(df_all)
+        elif manifest_mode:
+            _smooth_value_col(df_train)
+            if not getattr(args, "_manifest_same_series_test", False):
+                _smooth_value_col(df_test)
+        elif explicit_tv:
+            _smooth_value_col(df_train)
+            _smooth_value_col(df_val)
+            _smooth_value_col(df_test)
+        else:
+            _smooth_value_col(df_train_val)
+            _smooth_value_col(df_test)
+
+    test_series = df_test[vc].to_numpy(dtype=np.float32)
+    test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
+
+    if manifest_mode:
+        train_series = df_train[vc].to_numpy(dtype=np.float32)
+        train_features = df_train[feature_cols].to_numpy(dtype=np.float32)
+        test_series = df_test[vc].to_numpy(dtype=np.float32)
+        test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
+        val_series = val_features = None
+        tv_series = tv_features = tv_feat_norm = tv_target_norm = None
+        train_end_idx = None
+        full_series = full_features = None
+        manifest = getattr(args, "_window_manifest")
+        m_span = int(manifest["input_len"]) + int(manifest["pred_len"])
+        train_starts_m = np.asarray(manifest["train_window_starts"], dtype=np.int64)
+        row_tr = row_indices_covered_by_windows(train_starts_m, m_span, len(train_series))
+        train_mean = float(train_series[row_tr].mean())
+        train_std = float(train_series[row_tr].std()) + 1e-8
+        feat_mean = train_features[row_tr].mean(axis=0)
+        feat_std = train_features[row_tr].std(axis=0) + 1e-8
+        train_feat_norm = (train_features - feat_mean) / feat_std
+        train_target_norm = (train_series - train_mean) / train_std
+        val_feat_norm = train_feat_norm
+        val_target_norm = train_target_norm
+        test_feat_norm = (test_features - feat_mean) / feat_std
+        test_target_norm = (test_series - train_mean) / train_std
+        print(f"train_mean: {train_mean:.6f}")
+        print(f"train_std : {train_std:.6f}")
+    elif explicit_tv:
+        train_series = df_train[vc].to_numpy(dtype=np.float32)
+        val_series = df_val[vc].to_numpy(dtype=np.float32)
+        train_features = df_train[feature_cols].to_numpy(dtype=np.float32)
+        val_features = df_val[feature_cols].to_numpy(dtype=np.float32)
+        test_series = df_test[vc].to_numpy(dtype=np.float32)
+        test_features = df_test[feature_cols].to_numpy(dtype=np.float32)
+        tv_series = tv_features = tv_feat_norm = tv_target_norm = None
+        train_end_idx = None
+        full_series = full_features = None
+    elif single_file_mode:
+        full_series = df_all[vc].to_numpy(dtype=np.float32)
+        full_features = df_all[feature_cols].to_numpy(dtype=np.float32)
+        train_series = val_series = train_features = val_features = None
+        tv_series = tv_features = tv_feat_norm = tv_target_norm = None
+        train_end_idx = None
+    else:
+        full_series = full_features = None
+        train_series = val_series = train_features = val_features = None
+        tv_series = df_train_val[vc].to_numpy(dtype=np.float32)
+        tv_features = df_train_val[feature_cols].to_numpy(dtype=np.float32)
+
+    n_features = int(len(feature_cols))
+    setattr(args, "input_dim", n_features)
+    setattr(args, "feature_columns_resolved", feature_cols)
+    setattr(args, "data_split_explicit_tv", explicit_tv)
+    setattr(args, "data_split_single_csv", single_file_mode)
+    setattr(args, "data_split_manifest", manifest_mode)
+    print(f"Target column: {vc}")
+    print(f"Input feature columns ({n_features}): {feature_cols}")
+    if single_file_mode:
+        print(f"Data split: single CSV ({args.single_csv}), chronological window ratios")
+        print(f"Rows in file: {len(full_series)}")
+    elif manifest_mode:
+        manifest = getattr(args, "_window_manifest")
+        same_series = getattr(args, "_manifest_same_series_test", False)
+        if same_series:
+            print("Data split: purged random chunks on full series (train/val/test window manifest)")
+            print(f"Series rows (train+test) : {len(train_series)}  ({tr_path})")
+        else:
+            print("Data split: purged random dev windows + temporal holdout (window manifest)")
+            print(f"Dev rows (train-csv)     : {len(train_series)}  ({tr_path})")
+            print(f"Holdout rows (test-csv)  : {len(test_series)}  ({args.test_csv})")
+        print(f"Window manifest          : {manifest_path}")
+        _te_n = len(manifest.get("test_window_starts") or [])
+        print(
+            f"Manifest windows         : train={len(manifest['train_window_starts'])} "
+            f"val={len(manifest['val_window_starts'])} "
+            f"test={_te_n} "
+            f"(mode={manifest.get('mode')}, chunk_rows={manifest.get('chunk_rows')})"
+        )
+    elif explicit_tv:
+        print("Data split: explicit train / val / test CSVs")
+        print("(Val holdout fraction --val-ratio is ignored when --train-csv and --val-csv are set.)")
+        print(f"Train rows   : {len(train_series)}  ({tr_path})")
+        print(f"Val rows     : {len(val_series)}  ({va_path})")
+        print(f"Test rows    : {len(test_series)}  ({args.test_csv})")
+    else:
+        print("Data split: train_val CSV + test CSV; val = tail fraction of train_val windows")
+        print(f"Train+Val series length : {len(tv_series)}")
+        print(f"Test series length      : {len(test_series)}")
+    if args.require_uniform_timestep:
+        print(
+            f"Uniform timestep windows: nominal step {args.uniform_step_seconds}s "
+            f"(±{args.uniform_step_tolerance_seconds}s per adjacent pair)."
+        )
+        if single_file_mode:
+            summarize_timestamp_steps(
+                df_all["TIMESTAMP"],
+                "single",
+                args.uniform_step_seconds,
+                args.uniform_step_tolerance_seconds,
+            )
+        elif manifest_mode:
+            summarize_timestamp_steps(
+                df_train["TIMESTAMP"], "dev",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_test["TIMESTAMP"], "holdout",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+        elif explicit_tv:
+            summarize_timestamp_steps(
+                df_train["TIMESTAMP"], "train",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_val["TIMESTAMP"], "val",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_test["TIMESTAMP"], "test",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+        else:
+            summarize_timestamp_steps(
+                df_train_val["TIMESTAMP"], "train_val",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+            summarize_timestamp_steps(
+                df_test["TIMESTAMP"], "test",
+                args.uniform_step_seconds, args.uniform_step_tolerance_seconds,
+            )
+    if args.max_consecutive_timestamp_gap_seconds is not None:
+        print(
+            f"Max TIMESTAMP gap inside any model window: each consecutive step must be "
+            f"≤ {args.max_consecutive_timestamp_gap_seconds:g} s (windows crossing larger gaps are dropped)."
+        )
+
+    if single_file_mode:
+        train_mean = float("nan")
+        train_std = float("nan")
+    elif manifest_mode:
+        pass
+    elif explicit_tv:
+        train_mean = train_series.mean()
+        train_std = train_series.std() + 1e-8
+        feat_mean = train_features.mean(axis=0)
+        feat_std = train_features.std(axis=0) + 1e-8
+        train_feat_norm = (train_features - feat_mean) / feat_std
+        val_feat_norm = (val_features - feat_mean) / feat_std
+        test_feat_norm = (test_features - feat_mean) / feat_std
+        train_target_norm = (train_series - train_mean) / train_std
+        val_target_norm = (val_series - train_mean) / train_std
+        test_target_norm = (test_series - train_mean) / train_std
+        print(f"train_mean: {train_mean:.6f}")
+        print(f"train_std : {train_std:.6f}")
+    else:
+        train_end_idx = int(len(tv_series) * (1 - args.val_ratio))
+        train_mean = tv_series[:train_end_idx].mean()
+        train_std = tv_series[:train_end_idx].std() + 1e-8
+        feat_train = tv_features[:train_end_idx]
+        feat_mean = feat_train.mean(axis=0)
+        feat_std = feat_train.std(axis=0) + 1e-8
+        tv_feat_norm = (tv_features - feat_mean) / feat_std
+        test_feat_norm = (test_features - feat_mean) / feat_std
+        tv_target_norm = (tv_series - train_mean) / train_std
+        test_target_norm = (test_series - train_mean) / train_std
+        train_feat_norm = val_feat_norm = train_target_norm = val_target_norm = None
+        print(f"train_mean: {train_mean:.6f}")
+        print(f"train_std : {train_std:.6f}")
+
+    experiment_results = []
+
+    for input_len in args.input_lens:
+        for pred_len in args.pred_lens:
+            try:
+                span = input_len + pred_len
+                wk = window_start_index_kwargs_from_args(args, span)
+                if single_file_mode:
+                    T = int(len(full_series))
+                    n_slide = max(0, T - span + 1)
+                    if args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
+                        all_valid = compute_timestep_window_start_indices(df_all["TIMESTAMP"], **wk)
+                        _parts = []
+                        if args.require_uniform_timestep:
+                            _parts.append("uniform step")
+                        if args.max_consecutive_timestamp_gap_seconds is not None:
+                            _parts.append("max gap")
+                        _lbl = "+".join(_parts) if _parts else "filtered"
+                        print(
+                            f"  Single CSV {_lbl} windows: {len(all_valid)}/{n_slide} valid starts "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
+                        if len(all_valid) == 0 and n_slide > 0:
+                            print(
+                                "  [hint] 0 valid windows after timestamp filters. Check --uniform-step-seconds "
+                                "vs [step-stats:single], --uniform-step-tolerance-seconds, "
+                                "--max-consecutive-timestamp-gap-seconds, or disable filters "
+                                "(--no-require-uniform-timestep and omit max gap)."
+                            )
+                    else:
+                        all_valid = np.arange(n_slide, dtype=np.int64) if n_slide > 0 else np.zeros(0, dtype=np.int64)
+                        print(
+                            f"  Single CSV dense sliding: {len(all_valid)} starts "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
+                    M = int(all_valid.shape[0])
+                    rte_loop = (
+                        args.test_ratio
+                        if args.test_ratio is not None
+                        else (1.0 - args.train_ratio - args.val_ratio)
+                    )
+                    n_tr_w, n_va_w, n_te_w = split_window_counts(
+                        M,
+                        args.train_ratio,
+                        args.val_ratio,
+                        rte_loop,
+                        min_each=int(args.min_windows_per_split),
+                    )
+                    train_starts_arr = all_valid[:n_tr_w]
+                    val_starts_arr = all_valid[n_tr_w : n_tr_w + n_va_w]
+                    test_starts_arr = all_valid[n_tr_w + n_va_w :]
+                    v_stride = _resolve_eval_window_stride(args.val_window_stride, pred_len)
+                    te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                    train_starts_arr = subsample_window_starts(
+                        train_starts_arr, args.train_window_stride, split_name="single_csv train"
+                    )
+                    val_starts_arr = subsample_window_starts(
+                        val_starts_arr, v_stride, split_name="single_csv val"
+                    )
+                    test_starts_arr = subsample_window_starts(
+                        test_starts_arr, te_stride, split_name="single_csv test"
+                    )
+                    print(
+                        f"    Window splits: train={n_tr_w} ({n_tr_w / max(M, 1):.4f}), "
+                        f"val={n_va_w}, test={n_te_w} (target ratios "
+                        f"{args.train_ratio:.4f}/{args.val_ratio:.4f}/{rte_loop:.4f})"
+                    )
+                    row_tr = row_indices_covered_by_windows(train_starts_arr, span, T)
+                    train_mean = float(np.mean(full_series[row_tr]))
+                    train_std = float(np.std(full_series[row_tr])) + 1e-8
+                    feat_mean = np.mean(full_features[row_tr], axis=0)
+                    feat_std = np.std(full_features[row_tr], axis=0) + 1e-8
+                    feat_norm_all = (full_features - feat_mean) / feat_std
+                    target_norm_all = (full_series - train_mean) / train_std
+                    train_dataset = MultiStepDeltaDataset(
+                        feat_norm_all,
+                        target_norm_all,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=train_starts_arr,
+                    )
+                    val_dataset = MultiStepDeltaDataset(
+                        feat_norm_all,
+                        target_norm_all,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=val_starts_arr,
+                    )
+                    test_dataset = MultiStepDeltaDataset(
+                        feat_norm_all,
+                        target_norm_all,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=test_starts_arr,
+                    )
+                    tv_starts = None
+                elif manifest_mode:
+                    manifest = getattr(args, "_window_manifest")
+                    m_in = int(manifest["input_len"])
+                    m_pr = int(manifest["pred_len"])
+                    if m_in != int(input_len) or m_pr != int(pred_len):
+                        raise ValueError(
+                            f"Window manifest lens ({m_in}, {m_pr}) != training ({input_len}, {pred_len}). "
+                            "Match --input-lens / --pred-lens to the manifest or rebuild splits."
+                        )
+                    train_starts = np.asarray(manifest["train_window_starts"], dtype=np.int64)
+                    val_starts = np.asarray(manifest["val_window_starts"], dtype=np.int64)
+                    n_series_slide = max(0, len(train_target_norm) - span + 1)
+                    manifest_test = manifest.get("test_window_starts")
+                    same_series = getattr(args, "_manifest_same_series_test", False)
+                    if manifest_test is not None:
+                        test_starts = np.asarray(manifest_test, dtype=np.int64)
+                        test_feat_norm_ds = train_feat_norm
+                        test_target_norm_ds = train_target_norm
+                        test_label = "test (manifest)"
+                    else:
+                        n_hold_slide = max(0, len(test_target_norm) - span + 1)
+                        if args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
+                            test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                        else:
+                            test_starts = (
+                                np.arange(n_hold_slide, dtype=np.int64)
+                                if n_hold_slide > 0
+                                else np.zeros(0, dtype=np.int64)
+                            )
+                        test_feat_norm_ds = test_feat_norm
+                        test_target_norm_ds = test_target_norm
+                        test_label = "holdout (chrono)"
+                    print(
+                        f"  Manifest windows: train {len(train_starts)} | val {len(val_starts)} | "
+                        f"{test_label} {len(test_starts)} "
+                        f"(dense series starts {n_series_slide}; same_csv={same_series}) "
+                        f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                    )
+                    v_stride = _resolve_eval_window_stride(args.val_window_stride, pred_len)
+                    te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                    _tr0, _va0, _te0 = len(train_starts), len(val_starts), len(test_starts)
+                    train_starts = subsample_window_starts(
+                        train_starts, args.train_window_stride, split_name="train"
+                    )
+                    val_starts = subsample_window_starts(val_starts, v_stride, split_name="val")
+                    test_starts = subsample_window_starts(
+                        test_starts, te_stride, split_name="test" if manifest_test is not None else "holdout"
+                    )
+                    if (
+                        len(train_starts) != _tr0
+                        or len(val_starts) != _va0
+                        or len(test_starts) != _te0
+                    ):
+                        print(
+                            f"    Window strides: train every {max(1, int(args.train_window_stride))} "
+                            f"({_tr0}→{len(train_starts)}), "
+                            f"val every {v_stride} ({_va0}→{len(val_starts)}), "
+                            f"holdout every {te_stride} ({_te0}→{len(test_starts)})"
+                        )
+                    train_dataset = MultiStepDeltaDataset(
+                        train_feat_norm,
+                        train_target_norm,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=train_starts,
+                    )
+                    val_dataset = MultiStepDeltaDataset(
+                        val_feat_norm,
+                        val_target_norm,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=val_starts,
+                    )
+                    test_dataset = MultiStepDeltaDataset(
+                        test_feat_norm_ds,
+                        test_target_norm_ds,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                        sample_starts=test_starts,
+                    )
+                    tv_starts = None
+                elif args.require_uniform_timestep or args.max_consecutive_timestamp_gap_seconds is not None:
+                    if explicit_tv:
+                        train_starts = compute_timestep_window_start_indices(df_train["TIMESTAMP"], **wk)
+                        val_starts = compute_timestep_window_start_indices(df_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                        n_tr_s = max(0, len(train_target_norm) - span + 1)
+                        n_va_s = max(0, len(val_target_norm) - span + 1)
+                        n_te_s = max(0, len(test_target_norm) - span + 1)
+                        print(
+                            f"  Timestamp-filtered windows: train {len(train_starts)}/{n_tr_s} | "
+                            f"val {len(val_starts)}/{n_va_s} | "
+                            f"test {len(test_starts)}/{n_te_s} "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
+                        v_stride = _resolve_eval_window_stride(args.val_window_stride, pred_len)
+                        te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                        _tr0, _va0, _te0 = len(train_starts), len(val_starts), len(test_starts)
+                        train_starts = subsample_window_starts(
+                            train_starts, args.train_window_stride, split_name="train"
+                        )
+                        val_starts = subsample_window_starts(val_starts, v_stride, split_name="val")
+                        test_starts = subsample_window_starts(test_starts, te_stride, split_name="test")
+                        if (
+                            len(train_starts) != _tr0
+                            or len(val_starts) != _va0
+                            or len(test_starts) != _te0
+                        ):
+                            print(
+                                f"    Window strides: train every {max(1, int(args.train_window_stride))} "
+                                f"({_tr0}→{len(train_starts)}), "
+                                f"val every {v_stride} ({_va0}→{len(val_starts)}), "
+                                f"test every {te_stride} ({_te0}→{len(test_starts)})"
+                            )
+                    else:
+                        tv_starts = compute_timestep_window_start_indices(df_train_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                        te_stride = _resolve_eval_window_stride(args.test_window_stride, pred_len)
+                        _te0 = len(test_starts)
+                        test_starts = subsample_window_starts(
+                            test_starts, te_stride, split_name="test (train_val+test CSV mode)"
+                        )
+                        if len(test_starts) != _te0:
+                            print(
+                                f"    Test window stride {te_stride}: {_te0}→{len(test_starts)} starts "
+                                f"(train_val windows unchanged; set --train-window-stride to thin train_val)."
+                            )
+                        train_starts = val_starts = None
+                        n_tv_sliding = max(0, len(tv_target_norm) - span + 1)
+                        n_test_sliding = max(0, len(test_target_norm) - span + 1)
+                        print(
+                            f"  Timestamp-filtered windows kept: train_val {len(tv_starts)}/{n_tv_sliding} | "
+                            f"test {len(test_starts)}/{n_test_sliding} "
+                            f"(INPUT_LEN={input_len}, PRED_LEN={pred_len})."
+                        )
+
+                    if explicit_tv:
+                        train_dataset = MultiStepDeltaDataset(
+                            train_feat_norm,
+                            train_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=train_starts,
+                        )
+                        val_dataset = MultiStepDeltaDataset(
+                            val_feat_norm,
+                            val_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=val_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                    else:
+                        tv_dataset = MultiStepDeltaDataset(
+                            tv_feat_norm,
+                            tv_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=tv_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                        n_tv = len(tv_dataset)
+                        n_train = int(n_tv * (1 - args.val_ratio))
+                        train_dataset = Subset(tv_dataset, range(0, n_train))
+                        val_dataset = Subset(tv_dataset, range(n_train, n_tv))
+                else:
+                    tv_starts = train_starts = val_starts = test_starts = None
+                    if explicit_tv and args.max_consecutive_timestamp_gap_seconds is not None:
+                        train_starts = compute_timestep_window_start_indices(df_train["TIMESTAMP"], **wk)
+                        val_starts = compute_timestep_window_start_indices(df_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                    elif not explicit_tv and args.max_consecutive_timestamp_gap_seconds is not None:
+                        tv_starts = compute_timestep_window_start_indices(df_train_val["TIMESTAMP"], **wk)
+                        test_starts = compute_timestep_window_start_indices(df_test["TIMESTAMP"], **wk)
+                    if explicit_tv:
+                        train_dataset = MultiStepDeltaDataset(
+                            train_feat_norm,
+                            train_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=train_starts,
+                        )
+                        val_dataset = MultiStepDeltaDataset(
+                            val_feat_norm,
+                            val_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=val_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                    else:
+                        tv_dataset = MultiStepDeltaDataset(
+                            tv_feat_norm,
+                            tv_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=tv_starts,
+                        )
+                        test_dataset = MultiStepDeltaDataset(
+                            test_feat_norm,
+                            test_target_norm,
+                            input_len=input_len,
+                            pred_len=pred_len,
+                            sample_starts=test_starts,
+                        )
+                        n_tv = len(tv_dataset)
+                        n_train = int(n_tv * (1 - args.val_ratio))
+                        train_dataset = Subset(tv_dataset, range(0, n_train))
+                        val_dataset = Subset(tv_dataset, range(n_train, n_tv))
+
+                train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+                val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+                test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
+
+                fq = getattr(args, "forecast_quantiles", None)
+                if fq is not None and len(fq) == 0:
+                    fq = None
+
+                model = model_factory(input_len, pred_len, args, device)
+                if getattr(args, "init_checkpoint", None):
+                    load_init_checkpoint_weights(
+                        model,
+                        args.init_checkpoint,
+                        device,
+                        input_len=input_len,
+                        pred_len=pred_len,
+                    )
+                if fq is not None:
+                    if len(fq) < 2:
+                        raise ValueError(
+                            "--forecast-quantiles requires at least two levels (e.g. 0.05 0.5 0.95)."
+                        )
+                    with torch.no_grad():
+                        x_probe, _, _ = next(iter(train_loader))
+                        pr = model(x_probe[:1].to(device))
+                    if pr.dim() != 3 or pr.shape[1] != len(fq):
+                        raise ValueError(
+                            f"--forecast-quantiles requires model output (batch, Q={len(fq)}, pred_len); "
+                            f"got shape {tuple(pr.shape)}. Use a model with a quantile head "
+                            "(e.g. train_transformer_sweep.py or train_dlinear_sweep.py)."
+                        )
+                    criterion = QuantileForecastLoss(
+                        pred_len,
+                        fq,
+                        tail_weight=args.loss_tail_weight,
+                    ).to(device)
+                else:
+                    criterion = TrajectoryAwareLoss(
+                        pred_len=pred_len,
+                        delta=args.loss_huber_delta,
+                        point_weight=args.loss_point_weight,
+                        diff_weight=args.loss_diff_weight,
+                        curvature_weight=args.loss_curvature_weight,
+                        variance_weight=args.loss_variance_weight,
+                        laplacian_reg_weight=args.loss_laplacian_weight,
+                        tail_weight=args.loss_tail_weight,
+                    ).to(device)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer,
+                    mode="min",
+                    factor=args.scheduler_factor,
+                    patience=args.scheduler_patience,
+                )
+
+                best_val_loss = float("inf")
+                best_val_window_rmse = float("inf")
+                best_state = copy.deepcopy(model.state_dict())
+                history = []
+                patience_counter = 0
+
+                print(f"\n--- Training experiment: INPUT_LEN={input_len}, PRED_LEN={pred_len} ---")
+                print(
+                    f"Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)} | Test samples: {len(test_dataset)}"
+                )
+                if args.pred_smoothing_window > 1:
+                    w = (
+                        args.pred_smoothing_window
+                        if args.pred_smoothing_window % 2 == 1
+                        else args.pred_smoothing_window + 1
+                    )
+                    print(
+                        f"Test forecast post-smoothing: centered MA window={w} "
+                        "(applied to predictions only; validation RMSE during training is unsmoothed)."
+                    )
+
+                if fq is not None:
+                    print(
+                        f"Forecast quantiles (pinball loss, median for RMSE): {list(fq)} "
+                        "(prediction band = lowest–highest quantile in this list)."
+                    )
+                    print(
+                        "Per-epoch metrics: train_pinball / val_pinball = mean quantile (pinball) loss "
+                        "(same criterion; val uses eval mode so dropout is off — val pinball often reads "
+                        "lower than train). val_median_rmse = RMSE of the median quantile forecast only."
+                    )
+
+                for epoch in range(1, args.epochs + 1):
+                    train_loss = run_epoch(model, train_loader, criterion, optimizer, device)
+                    val_loss = run_epoch(model, val_loader, criterion, optimizer=None, device=device)
+                    val_window_rmse = compute_window_rmse(
+                        model, val_loader, train_std, train_mean, device, forecast_quantiles=fq
+                    )
+                    scheduler.step(val_loss)
+                    current_lr = optimizer.param_groups[0]["lr"]
+
+                    history.append(
+                        {
+                            "epoch": epoch,
+                            "train_loss": train_loss,
+                            "val_loss": val_loss,
+                            "val_window_rmse": val_window_rmse,
+                            "lr": current_lr,
+                        }
+                    )
+
+                    if fq is not None:
+                        print(
+                            f"Epoch {epoch:03d} | train_pinball={train_loss:.6f} | val_pinball={val_loss:.6f} "
+                            f"| val_median_rmse={val_window_rmse:.6f} | lr={current_lr:.2e}"
+                        )
+                    else:
+                        print(
+                            f"Epoch {epoch:03d} | train={train_loss:.6f} | val={val_loss:.6f} "
+                            f"| val_window_rmse={val_window_rmse:.6f} | lr={current_lr:.2e}"
+                        )
+
+                    if val_loss < best_val_loss - args.min_delta:
+                        best_val_loss = val_loss
+                        best_val_window_rmse = val_window_rmse
+                        best_state = copy.deepcopy(model.state_dict())
+                        patience_counter = 0
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= args.early_stopping_patience:
+                            print(f"Early stopping triggered at epoch {epoch}.")
+                            break
+
+                model.load_state_dict(best_state)
+                model.eval()
+
+                test_composite_loss = run_epoch(
+                    model, test_loader, criterion, optimizer=None, device=device
+                )
+                test_composite_loss_pct = float(test_composite_loss) * 100.0
+
+                all_preds_raw, all_targets_raw, preds_q_raw = collect_predictions(
+                    model, test_loader, train_std, train_mean, device, forecast_quantiles=fq
+                )
+                preds_quantiles_arr = None
+                if fq is not None:
+                    preds_quantiles_arr = np.asarray(preds_q_raw, dtype=np.float32).copy()
+                    if args.pred_smoothing_window > 1:
+                        preds_quantiles_arr = smooth_forecast_quantile_horizons(
+                            preds_quantiles_arr, args.pred_smoothing_window
+                        )
+                    all_preds_raw = np.asarray(
+                        preds_quantiles_arr[:, median_quantile_index(fq), :],
+                        dtype=np.float32,
+                    )
+                elif args.pred_smoothing_window > 1:
+                    all_preds_raw = smooth_forecast_horizons(all_preds_raw, args.pred_smoothing_window)
+                metrics = evaluate_metrics(all_targets_raw, all_preds_raw)
+                baseline = baseline_rmse(test_loader, pred_len, train_std, train_mean)
+                _lk = _loss_kwargs_from_args(args)
+                horizon_composite = compute_horizon_sliding_composite_losses(
+                    all_targets_raw,
+                    all_preds_raw,
+                    float(train_mean),
+                    float(train_std),
+                    _lk,
+                )
+                horizon_phase_composite = compute_horizon_phase_composite_losses(
+                    all_targets_raw,
+                    all_preds_raw,
+                    float(train_mean),
+                    float(train_std),
+                    _lk,
+                )
+                horizon_phase_h_ranges = horizon_phase_step_ranges(pred_len)
+
+                sample_idx = min(args.plot_sample_idx, len(test_dataset) - 1)
+                x, y_delta, last_val = test_dataset[sample_idx]
+                with torch.no_grad():
+                    pred_delta = model(x.unsqueeze(0).to(device)).cpu().numpy()[0]
+
+                last_val_f = float(last_val.numpy()[0])
+                true_raw = (y_delta.numpy() + last_val_f) * train_std + train_mean
+                true_raw = np.asarray(true_raw, dtype=np.float64).reshape(-1)
+                sample_preds_q_raw = None
+                if fq is not None:
+                    if pred_delta.ndim != 2 or int(pred_delta.shape[0]) != len(fq):
+                        raise ValueError(
+                            f"Quantile mode: expected model output shape (n_quantiles={len(fq)}, pred_len), "
+                            f"got {getattr(pred_delta, 'shape', None)} (ndim={getattr(pred_delta, 'ndim', None)})."
+                        )
+                    qa = (pred_delta + last_val_f) * train_std + train_mean
+                    if args.pred_smoothing_window > 1:
+                        for qi in range(qa.shape[0]):
+                            qa[qi] = smooth_forecast_vector(qa[qi], args.pred_smoothing_window)
+                    sample_preds_q_raw = np.asarray(qa, dtype=np.float32)
+                    pred_raw = np.asarray(qa[median_quantile_index(fq)], dtype=np.float32)
+                else:
+                    pd_vec = np.asarray(pred_delta, dtype=np.float64).reshape(-1)
+                    pred_raw = (pd_vec + last_val_f) * train_std + train_mean
+                    if args.pred_smoothing_window > 1:
+                        pred_raw = smooth_forecast_vector(pred_raw, args.pred_smoothing_window)
+
+                ts_off = int(test_dataset.sample_starts[sample_idx])
+                pred_ts = df_test["TIMESTAMP"].iloc[ts_off + input_len : ts_off + input_len + pred_len]
+
+                experiment_results.append(
+                    {
+                        "input_len": input_len,
+                        "pred_len": pred_len,
+                        "model_state_dict": copy.deepcopy(model.state_dict()),
+                        "best_val_loss": best_val_loss,
+                        "best_val_window_rmse": best_val_window_rmse,
+                        "test_composite_loss": float(test_composite_loss),
+                        "test_composite_loss_pct": float(test_composite_loss_pct),
+                        "history": pd.DataFrame(history),
+                        "metrics": metrics,
+                        "baseline_rmse": baseline,
+                        "horizon_composite": horizon_composite,
+                        "horizon_phase_composite": horizon_phase_composite,
+                        "horizon_phase_h_ranges": horizon_phase_h_ranges,
+                        "all_preds_raw": all_preds_raw,
+                        "all_targets_raw": all_targets_raw,
+                        "forecast_quantiles": list(fq) if fq is not None else None,
+                        "preds_quantiles_raw": preds_quantiles_arr,
+                        "sample_pred_raw": pred_raw,
+                        "sample_true_raw": true_raw,
+                        "sample_preds_q_raw": sample_preds_q_raw,
+                        "sample_timestamps": pred_ts,
+                        "test_sample_starts": np.asarray(test_dataset.sample_starts, dtype=np.int64).copy(),
+                        "train_mean": float(train_mean),
+                        "train_std": float(train_std),
+                    }
+                )
+            except ValueError as exc:
+                print(f"Skipping INPUT_LEN={input_len}, PRED_LEN={pred_len}: {exc}")
+
+    if not experiment_results:
+        raise RuntimeError("No valid experiment completed. Reduce INPUT_LEN or PRED_LEN.")
+
+    def _phase_composite_summary_row(result):
+        row = {
+            "input_len": result["input_len"],
+            "pred_len": result["pred_len"],
+            "best_val_loss": result["best_val_loss"],
+            "best_val_window_rmse": result["best_val_window_rmse"],
+            "test_composite_loss": result["test_composite_loss"],
+            "test_composite_loss_pct": result["test_composite_loss_pct"],
+            "test_mse": result["metrics"]["mse"],
+            "test_rmse": result["metrics"]["rmse"],
+            "test_mae": result["metrics"]["mae"],
+            "test_mape": result["metrics"]["mape"],
+            "test_r2": result["metrics"]["r2"],
+            "baseline_rmse": result["baseline_rmse"],
+            "test_composite_horizon_phases": horizon_phase_ranges_csv_string(result["horizon_phase_h_ranges"]),
+        }
+        for p in range(HORIZON_PHASE_COUNT):
+            v = result["horizon_phase_composite"][p]
+            row[f"test_composite_phase_{p + 1}"] = v
+            row[f"test_composite_phase_{p + 1}_pct"] = float(v) * 100.0 if np.isfinite(v) else float("nan")
+        return row
+
+    summary_df = pd.DataFrame([_phase_composite_summary_row(r) for r in experiment_results]).sort_values(
+        by="test_composite_loss"
+    ).reset_index(drop=True)
+
+    summary_path = os.path.join(args.output_dir, "experiment_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
+    print("\nExperiment summary:")
+    print(summary_df)
+    print(f"Saved summary to: {summary_path}")
+
+    best_result = min(experiment_results, key=lambda item: item["test_composite_loss"])
+    best_input_len = best_result["input_len"]
+    best_pred_len = best_result["pred_len"]
+
+    print(
+        f"\nBest config -> INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len}, "
+        f"best_val_loss={best_result['best_val_loss']:.6f}, "
+        f"best_val_window_rmse={best_result['best_val_window_rmse']:.6f}, "
+        f"test_composite_loss={best_result['test_composite_loss']:.6f} "
+        f"(loss×100={best_result['test_composite_loss_pct']:.4f}) "
+        f"[sweep winner = min test_composite; per-run checkpoint from val composite], "
+        f"test_rmse={best_result['metrics']['rmse']:.6f}"
+    )
+
+    checkpoint_path = os.path.join(args.output_dir, args.checkpoint_name)
+    best_checkpoint = {
+        "model_state_dict": best_result["model_state_dict"],
+        "best_val_loss": float(best_result["best_val_loss"]),
+        "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
+        "train_mean": float(best_result["train_mean"]),
+        "train_std": float(best_result["train_std"]),
+        "input_len": int(best_input_len),
+        "pred_len": int(best_pred_len),
+        "model_config": model_config_factory(args, best_input_len, best_pred_len),
+        "summary": summary_df.to_dict(orient="records"),
+    }
+    torch.save(best_checkpoint, checkpoint_path)
+    print(f"Saved best model to: {checkpoint_path}")
+
+    history_path = os.path.join(args.output_dir, "best_history.csv")
+    best_result["history"].to_csv(history_path, index=False)
+
+    metrics_path = os.path.join(args.output_dir, "best_metrics.json")
+    metrics_payload = {
+        "best_input_len": int(best_input_len),
+        "best_pred_len": int(best_pred_len),
+        "best_val_loss": float(best_result["best_val_loss"]),
+        "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
+        "test_composite_loss": float(best_result["test_composite_loss"]),
+        "test_composite_loss_pct": float(best_result["test_composite_loss_pct"]),
+        "metrics": best_result["metrics"],
+        "baseline_rmse": float(best_result["baseline_rmse"]),
+        "train_mean": float(best_result["train_mean"]),
+        "train_std": float(best_result["train_std"]),
+        "horizon_composite_loss": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_composite_loss_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_phase_composite": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
+        ],
+        "horizon_phase_composite_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
+        ],
+        "horizon_phase_step_ranges_1based": [
+            {
+                "h_start": a,
+                "h_end": b,
+                "composite_loss": float(m) if np.isfinite(m) else None,
+                "composite_loss_pct": float(m) * 100.0 if np.isfinite(m) else None,
+            }
+            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_composite"])
+        ],
+        "forecast_quantiles": best_result.get("forecast_quantiles"),
+    }
+    with open(metrics_path, "w", encoding="utf-8") as fp:
+        json.dump(metrics_payload, fp, indent=2)
+
+    _ts_cfg = int(getattr(args, "target_smoothing_window", 1))
+    target_smooth_stored = int(1 if _ts_cfg <= 1 else (_ts_cfg if _ts_cfg % 2 == 1 else _ts_cfg + 1))
+
+    best_config_path = os.path.join(args.output_dir, "best_config.json")
+    best_config_payload = {
+        "data_split_mode": (
+            "single_csv_window_ratios"
+            if single_file_mode
+            else (
+                "purged_dev_manifest_holdout"
+                if manifest_mode
+                else ("explicit_train_val_test" if explicit_tv else "train_val_holdout")
+            )
+        ),
+        "window_manifest": manifest_path if manifest_mode else None,
+        "single_csv": args.single_csv if single_file_mode else None,
+        "train_ratio_window": float(args.train_ratio) if single_file_mode else None,
+        "val_ratio_window": float(args.val_ratio) if single_file_mode else None,
+        "test_ratio_window": float(getattr(args, "test_ratio_resolved"))
+        if single_file_mode
+        else None,
+        "min_windows_per_split": int(args.min_windows_per_split) if single_file_mode else None,
+        "train_csv": tr_path if (explicit_tv or manifest_mode) else None,
+        "val_csv": va_path if explicit_tv else None,
+        "train_val_csv": None if (explicit_tv or single_file_mode) else args.train_val_csv,
+        "test_csv": None if single_file_mode else args.test_csv,
+        "value_column": args.value_column,
+        "feature_columns": args.feature_columns_resolved,
+        "use_all_numeric_features": bool(args.use_all_numeric_features),
+        "output_dir": args.output_dir,
+        "seed": args.seed,
+        "batch_size": args.batch_size,
+        "epochs": args.epochs,
+        "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "val_ratio": (
+            None
+            if explicit_tv or single_file_mode or manifest_mode
+            else float(args.val_ratio)
+        ),
+        "early_stopping_patience": args.early_stopping_patience,
+        "scheduler_patience": args.scheduler_patience,
+        "scheduler_factor": args.scheduler_factor,
+        "min_delta": args.min_delta,
+        "loss_huber_delta": args.loss_huber_delta,
+        "loss_point_weight": args.loss_point_weight,
+        "loss_diff_weight": args.loss_diff_weight,
+        "loss_curvature_weight": args.loss_curvature_weight,
+        "loss_variance_weight": args.loss_variance_weight,
+        "loss_laplacian_weight": args.loss_laplacian_weight,
+        "loss_tail_weight": float(args.loss_tail_weight),
+        "pred_smoothing_window": args.pred_smoothing_window,
+        "target_smoothing_window": target_smooth_stored,
+        "save_window_plots": args.save_window_plots,
+        "save_stitched_test_html": bool(args.save_stitched_test_html),
+        "rolling_window_artifact_limit": args.rolling_window_artifact_limit,
+        "require_uniform_timestep": bool(args.require_uniform_timestep),
+        "uniform_step_seconds": float(args.uniform_step_seconds),
+        "uniform_step_tolerance_seconds": float(args.uniform_step_tolerance_seconds),
+        "max_consecutive_timestamp_gap_seconds": (
+            float(args.max_consecutive_timestamp_gap_seconds)
+            if args.max_consecutive_timestamp_gap_seconds is not None
+            else None
+        ),
+        "best_input_len": int(best_input_len),
+        "best_pred_len": int(best_pred_len),
+        "model_config": model_config_factory(args, best_input_len, best_pred_len),
+        "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
+        "test_composite_loss": float(best_result["test_composite_loss"]),
+        "test_composite_loss_pct": float(best_result["test_composite_loss_pct"]),
+        "test_rmse": float(best_result["metrics"]["rmse"]),
+        "test_mse": float(best_result["metrics"]["mse"]),
+        "test_mae": float(best_result["metrics"]["mae"]),
+        "test_mape": float(best_result["metrics"]["mape"]),
+        "test_r2": float(best_result["metrics"]["r2"]),
+        "horizon_composite_loss": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_composite_loss_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_composite"]
+        ],
+        "horizon_phase_composite": [
+            float(x) if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
+        ],
+        "horizon_phase_composite_pct": [
+            float(x) * 100.0 if np.isfinite(x) else None for x in best_result["horizon_phase_composite"]
+        ],
+        "horizon_phase_step_ranges_1based": [
+            {
+                "h_start": a,
+                "h_end": b,
+                "composite_loss": float(m) if np.isfinite(m) else None,
+                "composite_loss_pct": float(m) * 100.0 if np.isfinite(m) else None,
+            }
+            for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_composite"])
+        ],
+        "forecast_quantiles": best_result.get("forecast_quantiles"),
+    }
+    with open(best_config_path, "w", encoding="utf-8") as fp:
+        json.dump(best_config_payload, fp, indent=2)
+
+    model_meta_path = None
+    if getattr(args, "write_model_meta_json", True):
+        try:
+            from model_meta import save_model_meta_json
+
+            data_src = tr_path or args.single_csv or args.train_val_csv
+            model_meta_path = save_model_meta_json(
+                checkpoint_path=checkpoint_path,
+                best_config=best_config_payload,
+                metrics_payload=metrics_payload,
+                data_source_path=data_src,
+                model_version=getattr(args, "model_version", "v1"),
+                mapping_csv=getattr(args, "sensor_mapping_csv", None),
+            )
+            print(f"Saved model metadata: {model_meta_path}")
+        except Exception as exc:
+            print(f"Warning: could not write model metadata JSON: {exc}")
+
+    horizon_composite_csv = os.path.join(args.output_dir, "best_horizon_composite.csv")
+    pd.DataFrame(
+        {
+            "horizon": np.arange(1, len(best_result["horizon_composite"]) + 1),
+            "composite_loss": best_result["horizon_composite"],
+            "composite_loss_pct": [float(x) * 100.0 for x in best_result["horizon_composite"]],
+        }
+    ).to_csv(horizon_composite_csv, index=False)
+
+    phase_composite_csv = os.path.join(args.output_dir, "best_horizon_phase_composite.csv")
+    pd.DataFrame(
+        [
+            {
+                "phase": i + 1,
+                "h_start": best_result["horizon_phase_h_ranges"][i][0],
+                "h_end": best_result["horizon_phase_h_ranges"][i][1],
+                "composite_loss": best_result["horizon_phase_composite"][i],
+                "composite_loss_pct": float(best_result["horizon_phase_composite"][i]) * 100.0
+                if np.isfinite(best_result["horizon_phase_composite"][i])
+                else float("nan"),
+            }
+            for i in range(HORIZON_PHASE_COUNT)
+        ]
+    ).to_csv(phase_composite_csv, index=False)
+
+    sample_path = os.path.join(args.output_dir, "best_sample_forecast.csv")
+    _n_h = int(best_result["pred_len"])
+
+    def _col_1d_float(name: str, arr) -> np.ndarray:
+        out = np.asarray(arr, dtype=np.float64).reshape(-1)
+        if out.shape[0] != _n_h:
+            raise ValueError(
+                f"best_sample_forecast column {name!r}: length {out.shape[0]} != pred_len {_n_h}"
+            )
+        return out
+
+    _ts = best_result["sample_timestamps"]
+    _ts_list = pd.Series(_ts).astype(str).tolist()
+    if len(_ts_list) != _n_h:
+        raise ValueError(
+            f"best_sample_forecast timestamps: length {len(_ts_list)} != pred_len {_n_h}"
+        )
+
+    _sample_cols = {
+        "timestamp": _ts_list,
+        "actual": _col_1d_float("actual", best_result["sample_true_raw"]),
+        "predicted": _col_1d_float("predicted", best_result["sample_pred_raw"]),
+    }
+    _bfq = best_result.get("forecast_quantiles")
+    _samp_q = best_result.get("sample_preds_q_raw")
+    if _bfq is not None and _samp_q is not None:
+        for qi, qv in enumerate(_bfq):
+            _sample_cols[_quantile_column_name(qv)] = _col_1d_float(
+                _quantile_column_name(qv), _samp_q[qi]
+            )
+    pd.DataFrame(_sample_cols).to_csv(sample_path, index=False)
+
+    save_plot(
+        path=os.path.join(args.output_dir, "best_learning_curve.png"),
+        title=f"Learning Curve (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
+        x_label="Epoch",
+        y_label="Loss",
+        x=best_result["history"]["epoch"],
+        y1=best_result["history"]["train_loss"],
+        y1_label="Train loss",
+        y2=best_result["history"]["val_loss"],
+        y2_label="Val loss",
+    )
+
+    _sample_png = os.path.join(args.output_dir, "best_sample_forecast.png")
+    if _bfq is not None and _samp_q is not None and len(_bfq) >= 2:
+        plt.figure(figsize=(10, 4))
+        xdt = best_result["sample_timestamps"]
+        lo = np.asarray(_samp_q[0], dtype=np.float64).reshape(-1)
+        hi = np.asarray(_samp_q[-1], dtype=np.float64).reshape(-1)
+        y_act = np.asarray(best_result["sample_true_raw"], dtype=np.float64).reshape(-1)
+        y_med = np.asarray(best_result["sample_pred_raw"], dtype=np.float64).reshape(-1)
+        plt.fill_between(
+            xdt,
+            lo,
+            hi,
+            color="C1",
+            alpha=0.22,
+            label=prediction_interval_band_label(_bfq),
+        )
+        plt.plot(xdt, y_act, color="C0", label="Actual", linewidth=1.2)
+        plt.plot(xdt, y_med, color="C1", label="Predicted (median)", linewidth=1.0)
+        plt.title(f"Single Forecast Window - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})")
+        plt.xlabel("Date")
+        plt.ylabel(args.value_column)
+        plt.legend(loc="best", fontsize=8)
+        plt.grid(True, alpha=0.35)
+        plt.gcf().autofmt_xdate()
+        plt.tight_layout()
+        plt.savefig(_sample_png, dpi=150)
+        plt.close()
+    else:
+        save_plot(
+            path=_sample_png,
+            title=f"Single Forecast Window - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
+            x_label="Date",
+            y_label=args.value_column,
+            x=best_result["sample_timestamps"],
+            y1=best_result["sample_true_raw"],
+            y1_label="Actual forecast",
+            y2=best_result["sample_pred_raw"],
+            y2_label="Predicted forecast",
+            rotate_dates=True,
+        )
+
+    starts = np.asarray(best_result["test_sample_starts"], dtype=np.int64)
+    h = 0
+    h_pred = best_result["all_preds_raw"][:, h]
+    h_true = best_result["all_targets_raw"][:, h]
+    ts_rows = starts + best_input_len + h
+    ts_h1 = df_test["TIMESTAMP"].iloc[ts_rows.tolist()].reset_index(drop=True)
+
+    horizon_1_path = os.path.join(args.output_dir, "best_horizon_1_forecast.csv")
+    build_horizon_forecast_dataframe(
+        timestamps=ts_h1,
+        actual=h_true,
+        predicted=h_pred,
+        horizon=1,
+    ).to_csv(horizon_1_path, index=False)
+
+    save_plot(
+        path=os.path.join(args.output_dir, "best_horizon_1.png"),
+        title=f"Horizon-1 Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
+        x_label="Date",
+        y_label=args.value_column,
+        x=ts_h1,
+        y1=h_true,
+        y1_label="Actual",
+        y2=h_pred,
+        y2_label="Predicted",
+        rotate_dates=True,
+    )
+
+    h = min(11, best_pred_len - 1)
+    h_pred = best_result["all_preds_raw"][:, h]
+    h_true = best_result["all_targets_raw"][:, h]
+    ts_rows_n = starts + best_input_len + h
+    ts_hn = df_test["TIMESTAMP"].iloc[ts_rows_n.tolist()].reset_index(drop=True)
+
+    horizon_n_path = os.path.join(args.output_dir, f"best_horizon_{h + 1}_forecast.csv")
+    build_horizon_forecast_dataframe(
+        timestamps=ts_hn,
+        actual=h_true,
+        predicted=h_pred,
+        horizon=h + 1,
+    ).to_csv(horizon_n_path, index=False)
+
+    preds_per_h = best_result["all_preds_raw"]
+    targets_per_h = best_result["all_targets_raw"]
+    horizon_arr = np.arange(1, best_pred_len + 1)
+    pred_mean_per_h = preds_per_h.mean(axis=0)
+    pred_std_per_h = preds_per_h.std(axis=0)
+    target_mean_per_h = targets_per_h.mean(axis=0)
+    target_std_per_h = targets_per_h.std(axis=0)
+    bias_per_h = pred_mean_per_h - target_mean_per_h
+    horizon_bias_df = pd.DataFrame(
+        {
+            "horizon": horizon_arr,
+            "pred_mean": pred_mean_per_h,
+            "pred_std": pred_std_per_h,
+            "target_mean": target_mean_per_h,
+            "target_std": target_std_per_h,
+            "bias_pred_minus_target": bias_per_h,
+        }
+    )
+    horizon_bias_csv_path = os.path.join(args.output_dir, "horizon_bias.csv")
+    horizon_bias_df.to_csv(horizon_bias_csv_path, index=False)
+
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    ax_top.plot(horizon_arr, target_mean_per_h, color="C0", label="Actual mean")
+    ax_top.fill_between(
+        horizon_arr,
+        target_mean_per_h - target_std_per_h,
+        target_mean_per_h + target_std_per_h,
+        color="C0",
+        alpha=0.15,
+        label="Actual ±1 std",
+    )
+    ax_top.plot(horizon_arr, pred_mean_per_h, color="C1", label="Predicted mean")
+    ax_top.fill_between(
+        horizon_arr,
+        pred_mean_per_h - pred_std_per_h,
+        pred_mean_per_h + pred_std_per_h,
+        color="C1",
+        alpha=0.15,
+        label="Predicted ±1 std",
+    )
+    ax_top.set_title(
+        f"Per-horizon mean & spread across {preds_per_h.shape[0]} test windows "
+        f"(INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len}, "
+        f"loss_tail_weight={float(args.loss_tail_weight):g})"
+    )
+    ax_top.set_ylabel(args.value_column)
+    ax_top.grid(True, alpha=0.35)
+    ax_top.legend(loc="best", fontsize=8)
+
+    ax_bot.axhline(0.0, color="0.55", linewidth=0.9)
+    ax_bot.plot(horizon_arr, bias_per_h, color="C3", label="Predicted - Actual (mean)")
+    ax_bot.set_xlabel("Horizon step")
+    ax_bot.set_ylabel("Mean bias")
+    ax_bot.grid(True, alpha=0.35)
+    ax_bot.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    horizon_bias_png_path = os.path.join(args.output_dir, "horizon_bias.png")
+    fig.savefig(horizon_bias_png_path, dpi=140)
+    plt.close(fig)
+
+    # Rolling-window input context matches training targets: --value-column after optional
+    # target pre-smoothing (not a separate raw column), so overlays stay coherent with horizons.
+    rolling_input_hist = test_series
+    rolling_input_label = str(args.value_column)
+
+    _roll_q = best_result.get("preds_quantiles_raw")
+    _roll_fq = best_result.get("forecast_quantiles")
+    rolling_windows_dir, rolling_combined_csv_path = save_rolling_window_forecasts(
+        output_dir=args.output_dir,
+        preds_raw=best_result["all_preds_raw"],
+        targets_raw=best_result["all_targets_raw"],
+        timestamps=df_test["TIMESTAMP"],
+        input_len=best_input_len,
+        pred_len=best_pred_len,
+        save_plots=args.save_window_plots,
+        max_per_window_artifacts=args.rolling_window_artifact_limit,
+        y_axis_label=args.value_column,
+        history_series_raw=rolling_input_hist,
+        window_input_row_starts=starts,
+        input_context_label=rolling_input_label,
+        pred_smoothing_window=args.pred_smoothing_window,
+        preds_quantiles_raw=_roll_q,
+        forecast_quantiles=_roll_fq,
+        prediction_interval_label=prediction_interval_band_label(_roll_fq),
+    )
+
+    stitched_html_path = None
+    if args.save_stitched_test_html:
+        stitched_html_path = save_stitched_test_forecast_html(
+            html_path=os.path.join(rolling_windows_dir, "stitched_test_forecast.html"),
+            timestamps=df_test["TIMESTAMP"],
+            window_starts=starts,
+            input_len=best_input_len,
+            pred_len=best_pred_len,
+            history_series_raw=rolling_input_hist,
+            preds_raw=best_result["all_preds_raw"],
+            targets_raw=best_result["all_targets_raw"],
+            y_axis_label=str(args.value_column),
+            input_context_label=rolling_input_label,
+            pred_smoothing_window=int(args.pred_smoothing_window),
+            preds_quantiles_raw=_roll_q,
+            forecast_quantiles=_roll_fq,
+            prediction_interval_label=prediction_interval_band_label(_roll_fq),
+            max_consecutive_gap_seconds=args.max_consecutive_timestamp_gap_seconds,
+        )
+
+    save_plot(
+        path=os.path.join(args.output_dir, f"best_horizon_{h + 1}.png"),
+        title=f"Horizon-{h + 1} Forecast - Test (INPUT_LEN={best_input_len}, PRED_LEN={best_pred_len})",
+        x_label="Date",
+        y_label=args.value_column,
+        x=ts_hn,
+        y1=h_true,
+        y1_label="Actual",
+        y2=h_pred,
+        y2_label="Predicted",
+        rotate_dates=True,
+    )
+
+    print("\nBest-run metrics:")
+    print(
+        f"Test composite (TrajectoryAware, normalized abs traj): "
+        f"{best_result['test_composite_loss']:.6f}  "
+        f"| loss×100 = {best_result['test_composite_loss_pct']:.4f}%"
+    )
+    print(f"Test MSE : {best_result['metrics']['mse']:.6f}")
+    print(f"Test RMSE: {best_result['metrics']['rmse']:.6f}")
+    print(f"Test MAE : {best_result['metrics']['mae']:.6f}")
+    print(f"Test MAPE: {best_result['metrics']['mape']:.6f}%")
+    print(f"Test R2  : {best_result['metrics']['r2']:.6f}")
+    print(f"Baseline RMSE: {best_result['baseline_rmse']:.6f}")
+
+    hc_arr = np.asarray(best_result["horizon_composite"], dtype=np.float64)
+    print(
+        "\nLocal composite by horizon (centered window length min(7, PRED_LEN); normalized abs traj; "
+        "same weights as TrajectoryAwareLoss). Full series:"
+        f"\n  {horizon_composite_csv}"
+    )
+    _max_print = 48
+    if len(hc_arr) <= _max_print:
+        rng = range(1, len(hc_arr) + 1)
+    else:
+        rng = list(range(1, 9)) + [-1] + list(range(len(hc_arr) - 7, len(hc_arr) + 1))
+    for i in rng:
+        if i == -1:
+            print(f"  ... ({len(hc_arr) - 16} horizons omitted) ...")
+            continue
+        hc = hc_arr[i - 1]
+        hp = float(hc) * 100.0 if np.isfinite(hc) else float("nan")
+        print(f"Horizon {i:03d} composite: {hc:.6f}  | loss×100 = {hp:.4f}%")
+
+    print(
+        "\nTest composite by horizon phase "
+        f"({HORIZON_PHASE_COUNT} contiguous bands over 1..PRED_LEN, pooled over test windows):"
+    )
+    for i in range(HORIZON_PHASE_COUNT):
+        hs, he = best_result["horizon_phase_h_ranges"][i]
+        cv = best_result["horizon_phase_composite"][i]
+        if hs is None or not np.isfinite(cv):
+            print(f"  Phase {i + 1}: (empty) composite=n/a")
+        else:
+            print(
+                f"  Phase {i + 1} (steps {hs}-{he}): composite={cv:.6f}  "
+                f"| loss×100 = {float(cv) * 100.0:.4f}%"
+            )
+
+    rolling_plots_dir = os.path.join(rolling_windows_dir, "plots")
+    rolling_csv_dir = os.path.join(rolling_windows_dir, "csv")
+
+    print("\nSaved artifacts:")
+    print(f"- {summary_path}")
+    print(f"- {history_path}")
+    print(f"- {metrics_path}")
+    print(f"- {best_config_path}")
+    print(f"- {horizon_composite_csv}")
+    print(f"- {phase_composite_csv}")
+    print(f"- {horizon_1_path}")
+    print(f"- {horizon_n_path}")
+    print(f"- {horizon_bias_csv_path}")
+    print(f"- {horizon_bias_png_path}")
+    print(f"- {rolling_windows_dir}/  (rolling_window_forecasts root)")
+    print(f"- {rolling_plots_dir}/  (per-window forecast PNGs — window_*.png)")
+    print(f"- {rolling_csv_dir}/  (per-window forecast CSVs)")
+    print(f"- {rolling_combined_csv_path}")
+    if stitched_html_path:
+        print(f"- {stitched_html_path}  (interactive stitched test Plotly HTML)")
+    print(f"- {sample_path}")
+    print(f"- {os.path.join(args.output_dir, 'best_sample_forecast.png')}")
+    print(f"- {checkpoint_path}")
+    if model_meta_path:
+        print(f"- {model_meta_path}")

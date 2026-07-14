@@ -741,7 +741,16 @@ def forecast_rolling_windows(
     """
     Slide 48-point input windows across each sensor's history and forecast the next 48.
 
-    For each window the same validation rules as :func:`forecast_vibration` apply.
+  For each window the same validation rules as :func:`forecast_vibration` apply:
+  insufficient points skip the model; interval and training-range issues add warnings
+  but still produce a forecast when there are exactly 48 input points.
+
+  When a sensor has fewer than ``input_len + pred_len`` rows (96 for current models),
+  a single latest-window forecast is attempted instead (colleague 48-point feed).
+
+  Returns a dict keyed by sensor id. Each value has ``windows``: a list of per-window
+  bodies including ``context_*``, ``predicted``, quantiles, ``interval_check``,
+  ``range_check``, and ``actual_*`` holdout series when enough history exists.
     """
     results: Dict[str, Any] = {}
 
@@ -873,6 +882,3 @@ def forecast_rolling_windows(
             results[sensor_id] = _forecast_failure(sensor_id, sensor_name, str(exc))
 
     return results
-
-
-def _build_smoothed_timeline(part: pd.DataFrame, smooth_window: int) -> pd.DataFrame:

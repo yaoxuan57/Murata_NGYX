@@ -11,12 +11,12 @@
 #SBATCH -o ~/logs/%x_%j.out
 #SBATCH -e ~/logs/%x_%j.err
 
-# Fine-tune on Jan–Jun with purged random 70/15/15 chunk split on the FULL timeline
-# (build_jan2jun_purged_splits.py --split-mode full_random), load init .pth weights.
+# Fine-tune on Jan–Jun with chronological 70/15/15 row split (train → val → test in time),
+# load init .pth weights.
 #
 # Prereqs:
-#   1) python finetune/build_jan2jun_purged_splits.py
-#      → finetune/data_AHU_2_9_Blower_DE_A/splits_purged/{full.csv,window_manifest.json}
+#   1) python finetune/build_jan2jun_only_splits.py
+#      → finetune/data_AHU_2_9_Blower_DE_A/splits/{train.csv,val.csv,test.csv}
 #   2) INIT_CHECKPOINT: same architecture (input_len=48, pred_len=48).
 #
 # Submit from repo root:
@@ -129,21 +129,32 @@ if [ ! -f "${SCRIPT_DIR}/train_transformer_sweep.py" ]; then
 fi
 echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
 
-# --- Purged full-timeline random split (build_jan2jun_purged_splits.py) ---
-SPLIT_DIR="${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/splits_purged"
-FULL_CSV=${FULL_CSV:-${SPLIT_DIR}/full.csv}
-WINDOW_MANIFEST=${WINDOW_MANIFEST:-${SPLIT_DIR}/window_manifest.json}
+# --- Chronological 70/15/15 (build_jan2jun_only_splits.py): first 70% train, next 15% val, last 15% test ---
+SPLIT_DIR="${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/splits"
+TRAIN_CSV=${TRAIN_CSV:-${SPLIT_DIR}/train.csv}
+VAL_CSV=${VAL_CSV:-${SPLIT_DIR}/val.csv}
+TEST_CSV=${TEST_CSV:-${SPLIT_DIR}/test.csv}
 
-for f in "${FULL_CSV}" "${WINDOW_MANIFEST}"; do
+# Optionally (re)build chrono splits before training.
+BUILD_SPLITS=${BUILD_SPLITS:-1}
+if [ "${BUILD_SPLITS}" = "1" ]; then
+  SOURCE_CSV=${SOURCE_CSV:-${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/AHU_2_9_Blower_DE_A_jan2_jun_30_min.csv}
+  python -u "${SCRIPT_DIR}/finetune/build_jan2jun_only_splits.py" \
+    --source "${SOURCE_CSV}" \
+    --out-dir "${SPLIT_DIR}"
+fi
+
+for f in "${TRAIN_CSV}" "${VAL_CSV}" "${TEST_CSV}"; do
   if [ ! -f "${f}" ]; then
     echo "ERROR: missing split file: ${f}" >&2
-    echo "Run: python finetune/build_jan2jun_purged_splits.py --split-mode full_random" >&2
+    echo "Run: python finetune/build_jan2jun_only_splits.py" >&2
     exit 1
   fi
 done
 
-DATA_FLAGS="--train-csv ${FULL_CSV} --test-csv ${FULL_CSV} --window-manifest ${WINDOW_MANIFEST}"
-DATA_TAG="finetune_blower_de_a_jan2jun_full_random"
+DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
+DATA_TAG="finetune_blower_de_a_jan2jun_chrono_70_15_15"
+echo "Data split: chronological train/val/test CSVs under ${SPLIT_DIR}"
 
 # --- Prior transformer checkpoint (required) ---
 INIT_CHECKPOINT=${INIT_CHECKPOINT:-${SCRIPT_DIR}/finetune/model_to_finetune/AHU_2_9_Blower_DE_A_v2.pth}

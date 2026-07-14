@@ -1,0 +1,26 @@
+# Murata_NGYX — match the REMOTE training environment (Python 3.10.12)
+#
+# Verified on training host:
+#   torch 2.10.0+cu128   (torch.version.cuda == 12.8)
+#   numpy 1.26.4
+#   pandas 2.3.3
+#
+# See also: requirements-lock-remote.txt
+#
+# --- PyTorch (install FIRST — use CUDA 12.8 wheel to match training) ---
+#   pip install torch==2.10.0 torchvision --index-url https://download.pytorch.org/whl/cu128
+#
+# CPU-only inference (only if models were trained and will run on CPU):
+#   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# Do NOT mix laptop pins (e.g. torch 2.11 + numpy 2.x) with checkpoints from the remote server.
+
+torch==2.10.0
+numpy==1.26.4
+pandas==2.3.3
+
+# Training-only (plots / optional Plotly HTML)
+matplotlib>=3.8,<3.11
+plotly>=5.0
+
+# Transformer pipeline does not use scikit-learn.

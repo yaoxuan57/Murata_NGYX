@@ -6,9 +6,9 @@ For each sensor and window:
   - validate input (point count, interval gaps, training range)
   - run the transformer forecast
   - write JSON results
-  - plot input + forecast band + actual holdout (requires deployment_plot for plots)
+  - plot input + forecast band + actual holdout
 
-  cd deployment
+  cd deployment_plot
   python run_inference.py
 
   python run_inference.py -i data/Jun.csv -o output/predictions_June.json
@@ -17,7 +17,6 @@ For each sensor and window:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
@@ -28,17 +27,14 @@ from inference import (  # noqa: E402
     write_predictions_json,
 )
 from io_utils import read_vibration_export_csv  # noqa: E402
+from plot_predictions import plot_rolling_inference_results  # noqa: E402
 from sensors import build_vibration_sensor_model_map  # noqa: E402
-
-_PLOT_ROOT = DEPLOY_ROOT.parent / "deployment_plot"
-if str(_PLOT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PLOT_ROOT))
 
 
 def parse_args() -> argparse.Namespace:
     default_input = DEPLOY_ROOT / "data" / "Jun.csv"
     default_output = DEPLOY_ROOT / "output" / "predictions_June.json"
-    default_models = DEPLOY_ROOT / "models"
+    default_models = DEPLOY_ROOT.parent / "deployment" / "models"
     default_plots = DEPLOY_ROOT / "output" / "plots"
 
     parser = argparse.ArgumentParser(
@@ -215,8 +211,6 @@ def main() -> None:
     print(f"\nSummary: {total_ok}/{total_windows} windows succeeded across {len(vib_results)} sensors")
 
     if not args.no_plot:
-        from plot_predictions import plot_rolling_inference_results  # noqa: WPS433
-
         args.plots_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n=== Plots -> {args.plots_dir / 'rolling'} ===")
         n_plot, n_skip, reasons = plot_rolling_inference_results(

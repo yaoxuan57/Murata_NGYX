@@ -1,0 +1,27 @@
+# Deployment inference — Python 3.10.12, match remote training host
+#
+# Why only 3 packages listed?
+#   deployment/run_inference.py imports ONLY: torch, numpy, pandas
+#   All Python code lives in this folder (inference.py, transformer_model.py, model_utils.py, …)
+#   torch pulls in its own dependencies (filelock, sympy, networkx, etc.) automatically.
+#   matplotlib / plotly are for TRAINING plots only — not needed to run inference.
+#
+# --- Install (pick GPU or CPU torch wheel; must match training: 2.10.0+cu128) ---
+#   pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r deployment/requirements.txt
+#
+# For the FULL environment (train + infer + plots), use instead:
+#   pip install -r requirements.txt
+# or the exact remote pins:
+#   pip install -r requirements-lock-remote.txt
+#
+# Run from this folder (default CSV: data/Vibration sensors _ 2022 to 2026.csv):
+#   cd deployment && python run_inference.py --all-sensors -c models
+
+torch==2.10.0
+numpy==1.26.4
+pandas==2.3.3
+
+# Optional: forecast plots (--plot on run_inference.py or run_plot_predictions.py)
+matplotlib>=3.8,<3.11
+plotly>=5.0
