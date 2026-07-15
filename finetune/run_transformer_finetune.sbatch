@@ -106,27 +106,57 @@ if [ -n "${ROLLING_WINDOW_ARTIFACT_LIMIT}" ] && [ "${ROLLING_WINDOW_ARTIFACT_LIM
 fi
 
 # --- Repo root (must contain train_transformer_sweep.py at top level) ---
-# If you submit from finetune/ (cd finetune && sbatch ...), SLURM_SUBMIT_DIR is wrong unless we fix it.
-_FINETUNE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_DEFAULT_REPO="$(cd "${_FINETUNE_DIR}/.." && pwd)"
+# Works whether you submit from repo root or from finetune/.
+_resolve_repo_root() {
+  local candidate dir roots=()
+  if [ -n "${REPO_ROOT:-}" ]; then
+    echo "${REPO_ROOT}"
+    return 0
+  fi
+  if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    roots+=("${SLURM_SUBMIT_DIR}")
+    roots+=("$(cd "${SLURM_SUBMIT_DIR}/.." 2>/dev/null && pwd || true)")
+  fi
+  local _script="${BASH_SOURCE[0]:-$0}"
+  if [ -n "${_script}" ]; then
+    if [ -f "${_script}" ]; then
+      roots+=("$(cd "$(dirname "${_script}")" && pwd)")
+      roots+=("$(cd "$(dirname "${_script}")/.." && pwd)")
+    elif [ -f "${SLURM_SUBMIT_DIR:-}/${_script}" ]; then
+      roots+=("$(cd "$(dirname "${SLURM_SUBMIT_DIR}/${_script}")" && pwd)")
+      roots+=("$(cd "$(dirname "${SLURM_SUBMIT_DIR}/${_script}")/.." && pwd)")
+    fi
+  fi
+  for candidate in "${roots[@]}"; do
+    [ -n "${candidate}" ] || continue
+    if [ -f "${candidate}/train_transformer_sweep.py" ]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    dir="${SLURM_SUBMIT_DIR}"
+    while [ "${dir}" != "/" ]; do
+      if [ -f "${dir}/train_transformer_sweep.py" ]; then
+        echo "${dir}"
+        return 0
+      fi
+      dir="$(dirname "${dir}")"
+    done
+  fi
+  return 1
+}
 
-REPO_ROOT=${REPO_ROOT:-}
-if [ -n "${REPO_ROOT}" ]; then
-  SCRIPT_DIR="${REPO_ROOT}"
-elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -f "${SLURM_SUBMIT_DIR}/train_transformer_sweep.py" ]; then
-  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
-elif [ -f "${_DEFAULT_REPO}/train_transformer_sweep.py" ]; then
-  SCRIPT_DIR="${_DEFAULT_REPO}"
-elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
-  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
-else
-  SCRIPT_DIR="${_DEFAULT_REPO}"
+if ! SCRIPT_DIR="$(_resolve_repo_root)"; then
+  echo "ERROR: could not find repo root (train_transformer_sweep.py)." >&2
+  echo "Submit from repo root:  cd .../Murata_NGYX && sbatch finetune/run_transformer_finetune.sbatch" >&2
+  echo "Or:  sbatch --export=ALL,REPO_ROOT=/home/users/astar/simt/ngyx/Murata_NGYX finetune/run_transformer_finetune.sbatch" >&2
+  exit 1
 fi
 cd "${SCRIPT_DIR}" || { echo "ERROR: cannot cd to SCRIPT_DIR=${SCRIPT_DIR}" >&2; exit 1; }
 if [ ! -f "${SCRIPT_DIR}/train_transformer_sweep.py" ]; then
   echo "ERROR: ${SCRIPT_DIR}/train_transformer_sweep.py not found." >&2
-  echo "Submit from repo root:  cd .../Murata_NGYX && sbatch finetune/run_transformer_finetune.sbatch" >&2
-  echo "Or set:  sbatch --export=ALL,REPO_ROOT=/path/to/Murata_NGYX finetune/run_transformer_finetune.sbatch" >&2
+  echo "Sync train_transformer_sweep.py, forecast_sweep_common.py, and model_meta.py to the repo root on the cluster." >&2
   exit 1
 fi
 echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
