@@ -11,26 +11,28 @@
 #SBATCH -o ~/logs/%x_%j.out
 #SBATCH -e ~/logs/%x_%j.err
 
-# Fine-tune on Jan–Jun with chronological 70/15/15 row split (train → val → test in time),
-# load init .pth weights.
-#
-# Prereqs:
-#   1) python finetune/build_jan2jun_only_splits.py
-#      → finetune/data_AHU_2_9_Blower_DE_A/splits/{train.csv,val.csv,test.csv}
-#   2) INIT_CHECKPOINT: same architecture (input_len=48, pred_len=48).
+# Fine-tune from existing per-sensor splits + base .pth.
+# Set ONE variable for the sensor; everything else is derived.
 #
 # Submit from repo root:
 #   cd /path/to/Murata_NGYX
-#   sbatch finetune/run_transformer_finetune.sbatch
-#
-# With explicit checkpoint (cluster path):
-#   sbatch --export=ALL,INIT_CHECKPOINT=/path/to/best_model/.../transformer_delta_huber_date_split_best.pth \
+#   sbatch --export=ALL,SENSOR_STEM=AHU_2_9_Blower_DE_V \
 #     finetune/run_transformer_finetune.sbatch
 #
-# Optional overrides:
+# Or default SENSOR_STEM below and just:
+#   sbatch finetune/run_transformer_finetune.sbatch
+#
+# Auto from SENSOR_STEM:
+#   SPLIT_DIR          = finetune/data_${SENSOR_STEM}/splits
+#   INIT_CHECKPOINT    = highest ${SENSOR_STEM}_v*.pth under model_to_finetune/ then deployment/models/
+#   DATA_TAG           = finetune_${short}_jan2jun_hist_jun_chrono
+#   --checkpoint-name  = transformer_finetune_${short}_best.pth
+#   BUILD_SPLITS       = 0  (never overwrite notebook/batch splits unless you set BUILD_SPLITS=1)
+#
+# Optional overrides (rare):
+#   INIT_CHECKPOINT=/explicit/path.pth
+#   SPLIT_DIR=/explicit/splits   (then SENSOR_STEM is inferred from .../data_<STEM>/splits)
 #   FINETUNE_LR=1e-5  FINETUNE_EPOCHS=80  EARLY_STOPPING_PATIENCE=15
-#   REQUIRE_UNIFORM_TIMESTEP=1
-#   MAX_CONSECUTIVE_TIMESTAMP_GAP_SECONDS=1860  (strict; like full tuning)
 
 set -euo pipefail
 
@@ -129,16 +131,28 @@ if [ ! -f "${SCRIPT_DIR}/train_transformer_sweep.py" ]; then
 fi
 echo "Using SCRIPT_DIR=${SCRIPT_DIR}"
 
-# --- Chronological 70/15/15 (build_jan2jun_only_splits.py): first 70% train, next 15% val, last 15% test ---
-SPLIT_DIR="${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/splits"
+# --- Sensor selection (change this ONE knob, or export SENSOR_STEM=...) ---
+# Examples: AHU_2_9_Blower_DE_A | AHU_2_9_Blower_DE_V | AHU_2_9_motor_NDE_H | AHU_4_4_Blower_DE_Vibration_X
+SENSOR_STEM=${SENSOR_STEM:-AHU_2_9_Blower_DE_A}
+
+# If SPLIT_DIR is provided explicitly, infer SENSOR_STEM from .../data_<STEM>/splits
+if [ -n "${SPLIT_DIR:-}" ]; then
+  _SPLIT_PARENT="$(basename "$(dirname "${SPLIT_DIR}")")"
+  if [[ "${_SPLIT_PARENT}" == data_* ]]; then
+    SENSOR_STEM="${_SPLIT_PARENT#data_}"
+  fi
+else
+  SPLIT_DIR="${SCRIPT_DIR}/finetune/data_${SENSOR_STEM}/splits"
+fi
+
 TRAIN_CSV=${TRAIN_CSV:-${SPLIT_DIR}/train.csv}
 VAL_CSV=${VAL_CSV:-${SPLIT_DIR}/val.csv}
 TEST_CSV=${TEST_CSV:-${SPLIT_DIR}/test.csv}
 
-# Optionally (re)build chrono splits before training.
-BUILD_SPLITS=${BUILD_SPLITS:-1}
+# Never overwrite notebook/batch splits unless explicitly requested.
+BUILD_SPLITS=${BUILD_SPLITS:-0}
 if [ "${BUILD_SPLITS}" = "1" ]; then
-  SOURCE_CSV=${SOURCE_CSV:-${SCRIPT_DIR}/finetune/data_AHU_2_9_Blower_DE_A/AHU_2_9_Blower_DE_A_jan2_jun_30_min.csv}
+  SOURCE_CSV=${SOURCE_CSV:-${SCRIPT_DIR}/finetune/data_${SENSOR_STEM}/${SENSOR_STEM}_jan2_jun_30_min.csv}
   python -u "${SCRIPT_DIR}/finetune/build_jan2jun_only_splits.py" \
     --source "${SOURCE_CSV}" \
     --out-dir "${SPLIT_DIR}"
@@ -147,21 +161,58 @@ fi
 for f in "${TRAIN_CSV}" "${VAL_CSV}" "${TEST_CSV}"; do
   if [ ! -f "${f}" ]; then
     echo "ERROR: missing split file: ${f}" >&2
-    echo "Run: python finetune/build_jan2jun_only_splits.py" >&2
+    echo "Expected splits under: ${SPLIT_DIR}" >&2
+    echo "Build with build_finetune_splits.ipynb / run_build_finetune_splits_all.py, or set BUILD_SPLITS=1" >&2
     exit 1
   fi
 done
 
-DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
-DATA_TAG="finetune_blower_de_a_jan2jun_chrono_70_15_15"
-echo "Data split: chronological train/val/test CSVs under ${SPLIT_DIR}"
+# Short tag for output folder + saved .pth name (e.g. blower_de_v, motor_nde_h)
+SENSOR_SHORT="$(echo "${SENSOR_STEM}" | sed -E 's/^AHU_[0-9]+_[0-9]+_//; s/_+/_/g' | tr '[:upper:]' '[:lower:]')"
+DATA_TAG=${DATA_TAG:-finetune_${SENSOR_SHORT}_jan2jun_hist_jun_chrono}
+CHECKPOINT_NAME=${CHECKPOINT_NAME:-transformer_finetune_${SENSOR_SHORT}_best.pth}
 
-# --- Prior transformer checkpoint (required) ---
-INIT_CHECKPOINT=${INIT_CHECKPOINT:-${SCRIPT_DIR}/finetune/model_to_finetune/AHU_2_9_Blower_DE_A_v2.pth}
+DATA_FLAGS="--train-csv ${TRAIN_CSV} --val-csv ${VAL_CSV} --test-csv ${TEST_CSV}"
+echo "SENSOR_STEM=${SENSOR_STEM}"
+echo "Data split: ${SPLIT_DIR}"
+echo "DATA_TAG=${DATA_TAG}"
+echo "CHECKPOINT_NAME=${CHECKPOINT_NAME}"
+
+# --- Prior transformer checkpoint (auto: highest ${SENSOR_STEM}_v*.pth) ---
+_resolve_init_checkpoint() {
+  local stem="$1"
+  local d f best="" best_n=-1 n
+  for d in \
+    "${SCRIPT_DIR}/finetune/model_to_finetune" \
+    "${SCRIPT_DIR}/deployment/models"
+  do
+    [ -d "${d}" ] || continue
+    shopt -s nullglob
+    for f in "${d}/${stem}"_v*.pth; do
+      n="$(echo "${f}" | sed -E "s/.*_v([0-9]+)\\.pth$/\\1/")"
+      if [[ "${n}" =~ ^[0-9]+$ ]] && [ "${n}" -gt "${best_n}" ]; then
+        best_n="${n}"
+        best="${f}"
+      fi
+    done
+    shopt -u nullglob
+    if [ -n "${best}" ]; then
+      echo "${best}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [ -z "${INIT_CHECKPOINT:-}" ]; then
+  if ! INIT_CHECKPOINT="$(_resolve_init_checkpoint "${SENSOR_STEM}")"; then
+    echo "ERROR: no ${SENSOR_STEM}_v*.pth found under finetune/model_to_finetune or deployment/models" >&2
+    echo "Set INIT_CHECKPOINT=/path/to/base.pth explicitly." >&2
+    exit 1
+  fi
+fi
 if [ ! -f "${INIT_CHECKPOINT}" ]; then
   echo "ERROR: INIT_CHECKPOINT not found: ${INIT_CHECKPOINT}" >&2
-  echo "Set INIT_CHECKPOINT to the .pth from your run_transformer_tuning.sbatch best_model rerun, e.g.:" >&2
-  echo "  outputs_transformer_tuning_.../best_model/cfg_48_k11_lr5e4_wd.../transformer_delta_huber_date_split_best.pth" >&2
   exit 1
 fi
 echo "Init checkpoint: ${INIT_CHECKPOINT}"
@@ -193,9 +244,10 @@ python -u "${SCRIPT_DIR}/train_transformer_sweep.py" \
   --weight-decay "${WEIGHT_DECAY}" \
   --init-checkpoint "${INIT_CHECKPOINT}" \
   --output-dir "${ROOT}" \
-  --checkpoint-name transformer_finetune_blower_de_a_best.pth
+  --checkpoint-name "${CHECKPOINT_NAME}"
 
 echo ""
 echo "Fine-tune completed."
-echo "Checkpoint: ${SCRIPT_DIR}/${ROOT}/transformer_finetune_blower_de_a_best.pth"
+echo "Checkpoint: ${SCRIPT_DIR}/${ROOT}/${CHECKPOINT_NAME}"
+echo "Meta JSON:  ${SCRIPT_DIR}/${ROOT}/${CHECKPOINT_NAME%.pth}_meta.json"
 echo "Plots:      ${SCRIPT_DIR}/${ROOT}/rolling_window_forecasts/plots/"

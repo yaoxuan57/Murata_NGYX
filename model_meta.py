@@ -29,8 +29,8 @@ SENSOR_ID_BY_NAME: Dict[str, str] = {
 def default_sensor_mapping_path() -> Path:
     candidates = [
         SCRIPT_DIR / "data" / "sensor_id_name_mapping.csv",
-        SCRIPT_DIR.parent / "data_30mins_frequency" / "sensor_id_name_mapping.csv",
         SCRIPT_DIR / "data_30mins_frequency" / "sensor_id_name_mapping.csv",
+        SCRIPT_DIR.parent / "data_30mins_frequency" / "sensor_id_name_mapping.csv",
     ]
     for path in candidates:
         if path.is_file():

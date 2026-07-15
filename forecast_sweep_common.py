@@ -273,6 +273,26 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         "Requires a model that returns (batch, n_quantiles, pred_len), e.g. train_transformer_sweep or train_dlinear_sweep. "
         "Median slice is used for RMSE / trajectory metrics; CSVs include one column per quantile.",
     )
+    parser.add_argument(
+        "--sensor-mapping-csv",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="CSV with SENSOR_CODE / SENSOR_NAME for model_meta.json (default: data/sensor_id_name_mapping.csv).",
+    )
+    parser.add_argument(
+        "--model-version",
+        type=str,
+        default="v1",
+        help="Version tag for model_meta.json (legacy; modelName is {sensorId}_rms_forecast).",
+    )
+    parser.add_argument(
+        "--no-model-meta-json",
+        dest="write_model_meta_json",
+        action="store_false",
+        help="Skip writing <checkpoint_stem>_meta.json beside the .pth file.",
+    )
+    parser.set_defaults(write_model_meta_json=True)
     return parser
 
 
@@ -2835,6 +2855,24 @@ def run_sweep(
     with open(best_config_path, "w", encoding="utf-8") as fp:
         json.dump(best_config_payload, fp, indent=2)
 
+    model_meta_path = None
+    if getattr(args, "write_model_meta_json", True):
+        try:
+            from model_meta import save_model_meta_json
+
+            data_src = tr_path or args.single_csv or args.train_val_csv
+            model_meta_path = save_model_meta_json(
+                checkpoint_path=checkpoint_path,
+                best_config=best_config_payload,
+                metrics_payload=metrics_payload,
+                data_source_path=data_src,
+                model_version=getattr(args, "model_version", "v1"),
+                mapping_csv=getattr(args, "sensor_mapping_csv", None),
+            )
+            print(f"Saved model metadata: {model_meta_path}")
+        except Exception as exc:
+            print(f"Warning: could not write model metadata JSON: {exc}")
+
     horizon_composite_csv = os.path.join(args.output_dir, "best_horizon_composite.csv")
     pd.DataFrame(
         {
@@ -3176,3 +3214,5 @@ def run_sweep(
     print(f"- {sample_path}")
     print(f"- {os.path.join(args.output_dir, 'best_sample_forecast.png')}")
     print(f"- {checkpoint_path}")
+    if model_meta_path:
+        print(f"- {model_meta_path}")
