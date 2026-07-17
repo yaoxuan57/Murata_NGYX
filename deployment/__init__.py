@@ -13,14 +13,16 @@ from inference import (
 from sensors import (
     AHU_2_9_SENSOR_DESCS,
     AHU_2_9_SENSOR_IDS,
-    build_vibration_sensor_model_map,
+    build_sensor_model_map_from_path_dict,
+    load_sensor_path_map,
     sensor_desc_to_slug,
 )
 
 __all__ = [
     "AHU_2_9_SENSOR_DESCS",
     "AHU_2_9_SENSOR_IDS",
-    "build_vibration_sensor_model_map",
+    "build_sensor_model_map_from_path_dict",
+    "load_sensor_path_map",
     "SensorModelMap",
     "VibrationInput",
     "forecast_vibration",

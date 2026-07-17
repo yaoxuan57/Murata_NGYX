@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A prj0000000262
-#SBATCH -p testqueue
+#SBATCH -p h200p
 #SBATCH -N 1
 #SBATCH --gpus=1
 #SBATCH --ntasks-per-node=1

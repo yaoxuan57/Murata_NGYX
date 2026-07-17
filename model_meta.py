@@ -123,13 +123,20 @@ def resolve_sensor_info(
         }
 
     cand_lower = candidate.lower()
-    for name, info in mapping.items():
-        if name.lower() in cand_lower or cand_lower in name.lower():
-            return {
-                "sensorId": info["sensorId"],
-                "sensorName": info["sensorName"],
-                "machineId": infer_machine_id(info["sensorName"]),
-            }
+    matches = [
+        (name, info)
+        for name, info in mapping.items()
+        if name.lower() in cand_lower or cand_lower in name.lower()
+    ]
+    if matches:
+        # Prefer the most specific name: "Blower DE Vibration X" must not be
+        # captured by the shorter "Blower DE V" entry.
+        name, info = max(matches, key=lambda item: len(item[0]))
+        return {
+            "sensorId": info["sensorId"],
+            "sensorName": info["sensorName"],
+            "machineId": infer_machine_id(info["sensorName"]),
+        }
 
     return {
         "sensorId": "",

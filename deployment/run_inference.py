@@ -2,16 +2,14 @@
 """
 Run vibration forecasts: rolling 48-point input windows -> 48-step forecasts.
 
-For each sensor and window:
-  - validate input (point count, interval gaps, training range)
-  - run the transformer forecast
-  - write JSON results
-  - plot input + forecast band + actual holdout (requires deployment_plot for plots)
+Routing (colleague-owned):
+  CSV SENSOR_CODE -> look up in a mapping dictionary {sensorId: modelFilePath}
+  -> load that .pth -> forecast.
 
   cd deployment
-  python run_inference.py
+  python run_inference.py --no-plot
 
-  python run_inference.py -i data/Jun.csv -o output/predictions_June.json
+  python run_inference.py -i data/Jun.csv --model-map sensor_model_map.json -o output/predictions_June.json
 """
 
 from __future__ import annotations
@@ -28,7 +26,10 @@ from inference import (  # noqa: E402
     write_predictions_json,
 )
 from io_utils import read_vibration_export_csv  # noqa: E402
-from sensors import build_vibration_sensor_model_map  # noqa: E402
+from sensors import (  # noqa: E402
+    build_sensor_model_map_from_path_dict,
+    load_sensor_path_map,
+)
 
 _PLOT_ROOT = DEPLOY_ROOT.parent / "deployment_plot"
 if str(_PLOT_ROOT) not in sys.path:
@@ -38,13 +39,13 @@ if str(_PLOT_ROOT) not in sys.path:
 def parse_args() -> argparse.Namespace:
     default_input = DEPLOY_ROOT / "data" / "Jun.csv"
     default_output = DEPLOY_ROOT / "output" / "predictions_June.json"
-    default_models = DEPLOY_ROOT / "models"
+    default_model_map = DEPLOY_ROOT / "sensor_model_map.json"
     default_plots = DEPLOY_ROOT / "output" / "plots"
 
     parser = argparse.ArgumentParser(
         description=(
-            "Load vibration CSV, run rolling 48->48 forecasts per sensor with "
-            "validation warnings, write JSON, and plot actual vs predicted."
+            "Load vibration CSV, resolve models via a sensorId->path dictionary, "
+            "run rolling 48->48 forecasts, write JSON, and optionally plot."
         ),
     )
     parser.add_argument(
@@ -55,10 +56,22 @@ def parse_args() -> argparse.Namespace:
         help=f"Vibration CSV (default: {default_input})",
     )
     parser.add_argument(
-        "--models-dir",
+        "--model-map",
         type=Path,
-        default=default_models,
-        help=f"Directory of .pth checkpoints (default: {default_models})",
+        default=default_model_map,
+        help=(
+            "JSON dictionary mapping sensorId -> model .pth path "
+            f"(default: {default_model_map})"
+        ),
+    )
+    parser.add_argument(
+        "--models-base",
+        type=Path,
+        default=DEPLOY_ROOT,
+        help=(
+            "Directory used to resolve relative paths inside --model-map "
+            f"(default: {DEPLOY_ROOT})"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -156,16 +169,48 @@ def main() -> None:
 
     if not args.input.is_file():
         raise SystemExit(f"Input CSV not found: {args.input}")
-    if not args.models_dir.is_dir():
-        raise SystemExit(f"Models directory not found: {args.models_dir}")
+    if not args.model_map.is_file():
+        raise SystemExit(f"Model path map not found: {args.model_map}")
 
     device = args.device
     if device == "cuda" and not __import__("torch").cuda.is_available():
         print("CUDA not available; using CPU.")
         device = "cpu"
 
+    # Route via colleague dictionary:
+    #   CSV SENSOR_CODE -> model_map[sensorId] -> .pth path
     vib_df = read_vibration_export_csv(str(args.input))
-    vibration_sensor_model_map = build_vibration_sensor_model_map(args.models_dir)
+    path_map = load_sensor_path_map(args.model_map)
+    vibration_sensor_model_map, routing = build_sensor_model_map_from_path_dict(
+        path_map,
+        vib_df,
+        base_dir=args.models_base,
+    )
+    print(
+        f"Model routing via {routing['codeColumn']} + path map: "
+        f"{len(routing['uniqueInputCodes'])} unique CSV code(s), "
+        f"{len(routing['matchedSensorIds'])} model(s) matched."
+    )
+    print(f"  Matched sensorId(s): {routing['matchedSensorIds']}")
+    if routing["unmatchedInputCodes"]:
+        print(
+            "  WARNING: no model path for CSV sensor code(s): "
+            f"{routing['unmatchedInputCodes']}"
+        )
+    if routing.get("missingModelFiles"):
+        for msg in routing["missingModelFiles"]:
+            print(f"  WARNING: {msg}")
+    if routing.get("missingSensorNames"):
+        print(
+            "  WARNING: matched sensorId(s) with no SENSOR_DESC in CSV: "
+            f"{routing['missingSensorNames']}"
+        )
+    if not vibration_sensor_model_map:
+        raise SystemExit(
+            "No model matched the input CSV sensor codes via the path map. "
+            f"Map sensorId(s): {routing['availableModelSensorIds']}; "
+            f"CSV code(s): {routing['uniqueInputCodes']}"
+        )
 
     print(
         f"Running rolling inference: {args.windows_per_sensor} window(s) per sensor "

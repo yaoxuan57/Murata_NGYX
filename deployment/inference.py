@@ -29,7 +29,8 @@ from windowing import VALUE_COLUMN
 # Multi-sensor table: CSV path or in-memory DataFrame (TIMESTAMP, SENSOR_DESC, Acceleration RMS, …).
 VibrationInput = Union[str, pd.DataFrame]
 
-# Colleague-facing map: sensorId -> { sensorId, sensorName, models: { transformer: { filePath, ... } } }
+# Internal map built from colleague path dict + CSV:
+#   sensorId -> { sensorId, sensorName, models: { transformer: { filePath, ... } } }
 SensorModelMap = Dict[str, Dict[str, Any]]
 
 
@@ -68,7 +69,6 @@ def load_sensor_prepared_rows(
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """Filter one sensor, sort by time, dedupe timestamps — no row-count limit."""
     canon = normalize_sensor_desc(sensor_desc)
-    resolve_sensor_list([canon])
 
     df, source = _load_vibration_frame(input)
     df["SENSOR_DESC"] = df["SENSOR_DESC"].map(normalize_sensor_desc)
@@ -873,6 +873,3 @@ def forecast_rolling_windows(
             results[sensor_id] = _forecast_failure(sensor_id, sensor_name, str(exc))
 
     return results
-
-
-def _build_smoothed_timeline(part: pd.DataFrame, smooth_window: int) -> pd.DataFrame:
