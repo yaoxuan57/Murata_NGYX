@@ -13,7 +13,7 @@ def parse_timestamp_series(
 ) -> pd.Series:
     """Parse TIMESTAMP strings (day-first / mixed formats)."""
     raw = series.astype(str).str.strip()
-    parsed = pd.to_datetime(raw, dayfirst=False, format="mixed", errors="coerce")
+    parsed = pd.to_datetime(raw, dayfirst=True, format="mixed", errors="coerce")
 
     mask = parsed.isna()
     if mask.any():

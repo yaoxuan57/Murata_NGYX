@@ -5,10 +5,20 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import pandas as pd
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from model_meta import (  # noqa: E402
+    discover_deployment_model_pairs,
+    parse_deployment_filename,
+)
 
 # Canonical names as they appear in the source CSV (``SENSOR_DESC`` column).
 AHU_2_9_SENSOR_DESCS: List[str] = [
@@ -250,23 +260,70 @@ def resolve_model_file_path(
 
 
 def _optional_sidecar_meta(checkpoint_path: Path) -> Dict[str, Any]:
-    """If a sibling ``.json`` exists beside the ``.pth``, load light metadata."""
-    meta_path = checkpoint_path.with_suffix(".json")
-    if not meta_path.is_file():
-        return {}
-    try:
-        payload = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    keep = {
-        "modelId": payload.get("modelId") or payload.get("modelName"),
-        "modelName": payload.get("modelName"),
-        "version": payload.get("version"),
-        "metadataFile": str(meta_path.resolve()),
+    """Load deployment metadata beside the model file (``.metadata.json`` or legacy ``.json``)."""
+    candidates: List[Path] = []
+    parsed = parse_deployment_filename(checkpoint_path.name)
+    if parsed is not None:
+        candidates.append(checkpoint_path.parent / f"{parsed['basename']}.metadata.json")
+    candidates.extend(
+        [
+            checkpoint_path.with_suffix(".metadata.json"),
+            checkpoint_path.with_suffix(".json"),
+            checkpoint_path.with_name(f"{checkpoint_path.stem}_meta.json"),
+        ]
+    )
+    seen: set[str] = set()
+    for meta_path in candidates:
+        key = str(meta_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not meta_path.is_file():
+            continue
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        keep = {
+            "modelId": payload.get("modelId") or payload.get("modelName"),
+            "modelName": payload.get("modelName"),
+            "modelType": payload.get("modelType"),
+            "version": payload.get("version"),
+            "metadataFile": str(meta_path.resolve()),
+        }
+        return {k: v for k, v in keep.items() if v is not None}
+    return {}
+
+
+def build_path_map_from_models_dir(
+    models_dir: Union[str, Path],
+) -> SensorPathMap:
+    """
+    Build ``{sensorId: modelPath}`` from batch-uploaded files in *models_dir*.
+
+    Pairs ``modelType__sensorID__sensorName.pth`` with the matching
+    ``modelType__sensorID__sensorName.metadata.json``.
+    """
+    pairs = discover_deployment_model_pairs(models_dir)
+    return {
+        sensor_id: str(entry["modelPath"])
+        for sensor_id, entry in sorted(pairs.items())
     }
-    return {k: v for k, v in keep.items() if v is not None}
+
+
+def build_sensor_model_map_from_models_dir(
+    models_dir: Union[str, Path],
+    vib_df: pd.DataFrame,
+) -> Tuple[Dict[str, dict], Dict[str, Any]]:
+    """Route CSV sensor codes via filename-paired models under *models_dir*."""
+    path_map = build_path_map_from_models_dir(models_dir)
+    return build_sensor_model_map_from_path_dict(
+        path_map,
+        vib_df,
+        base_dir=Path(models_dir).resolve().parent,
+    )
 
 
 def _alias_index(path_map: Mapping[str, str]) -> Dict[str, str]:

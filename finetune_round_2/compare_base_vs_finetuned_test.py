@@ -175,6 +175,37 @@ def build_full_series_from_parts(
     return df_full, forecast_in_test
 
 
+def build_split_windows(
+    df_split: pd.DataFrame,
+    *,
+    input_len: int,
+    pred_len: int,
+    require_uniform_timestep: bool,
+    uniform_step_seconds: float,
+    uniform_tol_seconds: float,
+    max_gap_seconds: Optional[float],
+    window_stride: int,
+    split_name: str,
+) -> np.ndarray:
+    """Sliding windows entirely inside one split CSV (train, val, or test)."""
+    span = input_len + pred_len
+    n = len(df_split)
+    if n < span:
+        return np.array([], dtype=np.int64)
+    starts = np.arange(0, n - span + 1, dtype=np.int64)
+    if require_uniform_timestep or max_gap_seconds is not None:
+        allowed = compute_timestep_window_start_indices(
+            df_split["TIMESTAMP"],
+            span,
+            nominal_seconds=uniform_step_seconds if require_uniform_timestep else None,
+            tolerance_seconds=uniform_tol_seconds,
+            max_consecutive_gap_seconds=max_gap_seconds,
+        )
+        allowed_set = set(int(x) for x in allowed)
+        starts = np.asarray([i for i in starts if int(i) in allowed_set], dtype=np.int64)
+    return subsample_window_starts(starts, window_stride, split_name=split_name)
+
+
 def build_test_only_windows(
     df_test: pd.DataFrame,
     *,
@@ -187,22 +218,17 @@ def build_test_only_windows(
     test_stride: int,
 ) -> np.ndarray:
     """Match finetune training eval: sliding windows entirely inside test.csv."""
-    span = input_len + pred_len
-    n = len(df_test)
-    if n < span:
-        return np.array([], dtype=np.int64)
-    starts = np.arange(0, n - span + 1, dtype=np.int64)
-    if require_uniform_timestep or max_gap_seconds is not None:
-        allowed = compute_timestep_window_start_indices(
-            df_test["TIMESTAMP"],
-            span,
-            nominal_seconds=uniform_step_seconds if require_uniform_timestep else None,
-            tolerance_seconds=uniform_tol_seconds,
-            max_consecutive_gap_seconds=max_gap_seconds,
-        )
-        allowed_set = set(int(x) for x in allowed)
-        starts = np.asarray([i for i in starts if int(i) in allowed_set], dtype=np.int64)
-    return subsample_window_starts(starts, test_stride, split_name="test")
+    return build_split_windows(
+        df_test,
+        input_len=input_len,
+        pred_len=pred_len,
+        require_uniform_timestep=require_uniform_timestep,
+        uniform_step_seconds=uniform_step_seconds,
+        uniform_tol_seconds=uniform_tol_seconds,
+        max_gap_seconds=max_gap_seconds,
+        window_stride=test_stride,
+        split_name="test",
+    )
 
 
 def prepare_eval_frames(
@@ -511,10 +537,12 @@ def process_sensor(
     max_gap_seconds: Optional[float],
     test_stride: int,
     eval_mode: str,
+    eval_splits: List[str],
     target_smoothing_window: int,
     skip_missing_finetuned: bool,
     base_only: bool,
     finetuned_dir: Optional[Path] = None,
+    base_checkpoint: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
     splits_dir = FINETUNE_DIR / f"data_{stem}" / "splits"
     test_csv = splits_dir / "test.csv"
@@ -522,10 +550,11 @@ def process_sensor(
         print(f"[skip] {stem}: missing {test_csv}")
         return None
 
-    base_pth = resolve_base_checkpoint(BASE_MODEL_DIR, stem)
+    base_pth = base_checkpoint or resolve_base_checkpoint(BASE_MODEL_DIR, stem)
     if base_pth is None:
         print(f"[skip] {stem}: no base checkpoint in {BASE_MODEL_DIR}")
         return None
+    base_pth = base_pth.resolve()
 
     finetuned_pth = resolve_finetuned_pth(stem, finetuned_dir=finetuned_dir)
     if finetuned_pth is None and not base_only:
@@ -543,130 +572,158 @@ def process_sensor(
     _, _, _, input_len, pred_len = load_checkpoint_bundle(base_pth, device)
     stride = resolve_test_stride(test_stride, pred_len)
     df_train, df_val, df_test = load_splits_smoothed(splits_dir, target_smoothing_window)
-    df_eval, window_starts, mode_label = prepare_eval_frames(
-        df_train,
-        df_val,
-        df_test,
-        eval_mode=eval_mode,
-        input_len=input_len,
-        pred_len=pred_len,
-        require_uniform_timestep=require_uniform_timestep,
-        uniform_step_seconds=uniform_step_seconds,
-        uniform_tol_seconds=uniform_tol_seconds,
-        max_gap_seconds=max_gap_seconds,
-        test_stride=stride,
-        target_smoothing_window=target_smoothing_window,
-    )
-    print(f"  eval mode: {mode_label}")
-    print(f"  test windows: {len(window_starts)}")
-
-    if window_starts.size == 0:
-        print(f"[skip] {stem}: no valid test windows")
-        return None
-
-    base = run_model_on_test_windows(
-        base_pth, df_eval, window_starts, norm_df=df_train, device=device, batch_size=batch_size
-    )
-    finetuned: Optional[Dict[str, Any]] = None
-    if finetuned_pth is not None:
-        finetuned = run_model_on_test_windows(
-            finetuned_pth,
-            df_eval,
-            window_starts,
-            norm_df=df_train,
-            device=device,
-            batch_size=batch_size,
-        )
+    split_frames = {"train": df_train, "val": df_val, "test": df_test}
 
     sensor_out = out_dir / stem
     sensor_out.mkdir(parents=True, exist_ok=True)
-    history = df_eval[VALUE_COL].to_numpy(dtype=np.float64)
+    split_summaries: Dict[str, Any] = {}
 
-    fq = base.get("forecast_quantiles")
-    save_stitched_test_forecast_html(
-        html_path=str(sensor_out / "stitched_test_base.html"),
-        timestamps=df_eval["TIMESTAMP"],
-        window_starts=window_starts,
-        input_len=input_len,
-        pred_len=pred_len,
-        history_series_raw=history,
-        preds_raw=base["preds_raw"],
-        targets_raw=base["targets_raw"],
-        y_axis_label=VALUE_COL,
-        input_context_label=VALUE_COL,
-        pred_smoothing_window=1,
-        preds_quantiles_raw=base.get("preds_quantiles_raw"),
-        forecast_quantiles=fq,
-        prediction_interval_label=prediction_interval_band_label(fq),
-        max_consecutive_gap_seconds=max_gap_seconds,
-    )
+    for split_name in eval_splits:
+        if split_name not in split_frames:
+            raise ValueError(f"Unknown split {split_name!r}; expected train, val, or test.")
+        split_csv = splits_dir / f"{split_name}.csv"
+        if not split_csv.is_file():
+            print(f"[skip] {stem}/{split_name}: missing {split_csv}")
+            continue
 
-    if finetuned is not None:
-        fq_ft = finetuned.get("forecast_quantiles")
+        if eval_mode == "test_only" or split_name == "test":
+            df_eval = split_frames[split_name]
+            window_starts = build_split_windows(
+                df_eval,
+                input_len=input_len,
+                pred_len=pred_len,
+                require_uniform_timestep=require_uniform_timestep,
+                uniform_step_seconds=uniform_step_seconds,
+                uniform_tol_seconds=uniform_tol_seconds,
+                max_gap_seconds=max_gap_seconds,
+                window_stride=stride,
+                split_name=split_name,
+            )
+            mode_label = f"{split_name}.csv only ({len(df_eval)} rows)"
+        else:
+            df_eval, window_starts, mode_label = prepare_eval_frames(
+                df_train,
+                df_val,
+                df_test,
+                eval_mode=eval_mode,
+                input_len=input_len,
+                pred_len=pred_len,
+                require_uniform_timestep=require_uniform_timestep,
+                uniform_step_seconds=uniform_step_seconds,
+                uniform_tol_seconds=uniform_tol_seconds,
+                max_gap_seconds=max_gap_seconds,
+                test_stride=stride,
+                target_smoothing_window=target_smoothing_window,
+            )
+            split_name = "test"
+
+        print(f"  [{split_name}] {mode_label}")
+        print(f"  [{split_name}] windows: {len(window_starts)}")
+        if window_starts.size == 0:
+            print(f"[skip] {stem}/{split_name}: no valid windows")
+            continue
+
+        base = run_model_on_test_windows(
+            base_pth, df_eval, window_starts, norm_df=df_train, device=device, batch_size=batch_size
+        )
+        finetuned: Optional[Dict[str, Any]] = None
+        if finetuned_pth is not None:
+            finetuned = run_model_on_test_windows(
+                finetuned_pth,
+                df_eval,
+                window_starts,
+                norm_df=df_train,
+                device=device,
+                batch_size=batch_size,
+            )
+
+        history = df_eval[VALUE_COL].to_numpy(dtype=np.float64)
+        fq = base.get("forecast_quantiles")
+        base_html = sensor_out / f"stitched_{split_name}_base.html"
         save_stitched_test_forecast_html(
-            html_path=str(sensor_out / "stitched_test_finetuned.html"),
+            html_path=str(base_html),
             timestamps=df_eval["TIMESTAMP"],
             window_starts=window_starts,
             input_len=input_len,
             pred_len=pred_len,
             history_series_raw=history,
-            preds_raw=finetuned["preds_raw"],
-            targets_raw=finetuned["targets_raw"],
+            preds_raw=base["preds_raw"],
+            targets_raw=base["targets_raw"],
             y_axis_label=VALUE_COL,
             input_context_label=VALUE_COL,
             pred_smoothing_window=1,
-            preds_quantiles_raw=finetuned.get("preds_quantiles_raw"),
-            forecast_quantiles=fq_ft,
-            prediction_interval_label=prediction_interval_band_label(fq_ft),
+            preds_quantiles_raw=base.get("preds_quantiles_raw"),
+            forecast_quantiles=fq,
+            prediction_interval_label=prediction_interval_band_label(fq),
             max_consecutive_gap_seconds=max_gap_seconds,
         )
-        save_comparison_html(
-            sensor_out / "comparison_base_vs_finetuned.html",
-            stem=stem,
-            timestamps=df_eval["TIMESTAMP"],
-            window_starts=window_starts,
-            input_len=input_len,
-            pred_len=pred_len,
-            history_series=history,
-            base=base,
-            finetuned=finetuned,
+
+        finetuned_html = None
+        comparison_html = None
+        if finetuned is not None:
+            fq_ft = finetuned.get("forecast_quantiles")
+            finetuned_html = sensor_out / f"stitched_{split_name}_finetuned.html"
+            save_stitched_test_forecast_html(
+                html_path=str(finetuned_html),
+                timestamps=df_eval["TIMESTAMP"],
+                window_starts=window_starts,
+                input_len=input_len,
+                pred_len=pred_len,
+                history_series_raw=history,
+                preds_raw=finetuned["preds_raw"],
+                targets_raw=finetuned["targets_raw"],
+                y_axis_label=VALUE_COL,
+                input_context_label=VALUE_COL,
+                pred_smoothing_window=1,
+                preds_quantiles_raw=finetuned.get("preds_quantiles_raw"),
+                forecast_quantiles=fq_ft,
+                prediction_interval_label=prediction_interval_band_label(fq_ft),
+                max_consecutive_gap_seconds=max_gap_seconds,
+            )
+            comparison_html = sensor_out / f"comparison_{split_name}_base_vs_finetuned.html"
+            save_comparison_html(
+                comparison_html,
+                stem=stem,
+                timestamps=df_eval["TIMESTAMP"],
+                window_starts=window_starts,
+                input_len=input_len,
+                pred_len=pred_len,
+                history_series=history,
+                base=base,
+                finetuned=finetuned,
+            )
+
+        split_summaries[split_name] = {
+            "n_windows": int(len(window_starts)),
+            "base_rmse": base["rmse"],
+            "finetuned_rmse": finetuned["rmse"] if finetuned else None,
+            "base_mae": base["mae"],
+            "finetuned_mae": finetuned["mae"] if finetuned else None,
+            "base_mape": base["mape"],
+            "finetuned_mape": finetuned["mape"] if finetuned else None,
+            "outputs": {
+                "base_html": str(base_html),
+                "finetuned_html": str(finetuned_html) if finetuned_html else None,
+                "comparison_html": str(comparison_html) if comparison_html else None,
+            },
+        }
+        print(
+            f"  [{split_name}] RMSE={base['rmse']:.4f} MAE={base['mae']:.4f} MAPE={base['mape']:.2f}%"
         )
+
+    if not split_summaries:
+        print(f"[skip] {stem}: no splits produced outputs")
+        return None
 
     summary = {
         "stem": stem,
-        "n_test_windows": int(len(window_starts)),
         "base_checkpoint": str(base_pth),
         "finetuned_checkpoint": str(finetuned_pth) if finetuned_pth else None,
-        "base_rmse": base["rmse"],
-        "finetuned_rmse": finetuned["rmse"] if finetuned else None,
-        "base_mae": base["mae"],
-        "finetuned_mae": finetuned["mae"] if finetuned else None,
-        "base_mape": base["mape"],
-        "finetuned_mape": finetuned["mape"] if finetuned else None,
-        "rmse_improvement_pct": (
-            float((base["rmse"] - finetuned["rmse"]) / base["rmse"] * 100.0)
-            if finetuned and base["rmse"] > 0
-            else None
-        ),
-        "outputs": {
-            "base_html": str(sensor_out / "stitched_test_base.html"),
-            "finetuned_html": str(sensor_out / "stitched_test_finetuned.html") if finetuned else None,
-            "comparison_html": str(sensor_out / "comparison_base_vs_finetuned.html") if finetuned else None,
-        },
+        "splits": split_summaries,
     }
     with open(sensor_out / "metrics.json", "w", encoding="utf-8") as fp:
         json.dump(summary, fp, indent=2)
         fp.write("\n")
-    if finetuned:
-        print(
-            f"  RMSE base={base['rmse']:.4f} finetuned={finetuned['rmse']:.4f} "
-            f"({'better' if finetuned['rmse'] < base['rmse'] else 'worse'})"
-        )
-    else:
-        print(
-            f"  RMSE base={base['rmse']:.4f} MAE={base['mae']:.4f} "
-            f"MAPE={base['mape']:.2f}% (finetuned checkpoint not found)"
-        )
     return summary
 
 
@@ -699,8 +756,21 @@ def main() -> None:
         "--eval-mode",
         choices=("test_only", "full_context"),
         default="test_only",
-        help="test_only = match finetune stitched plot (windows inside test.csv only). "
-        "full_context = train+val history for input (deployment-like).",
+        help="test_only = windows inside each split CSV only. "
+        "full_context = train+val history for input (deployment-like; test split only).",
+    )
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=("train", "val", "test"),
+        default=["test"],
+        help="Which split CSVs to evaluate (default: test). Use: --splits train val test",
+    )
+    parser.add_argument(
+        "--base-checkpoint",
+        type=Path,
+        default=None,
+        help="Override base .pth path (default: model_to_finetune/<STEM>_merged.pth or highest _vN).",
     )
     parser.add_argument(
         "--test-window-stride",
@@ -746,10 +816,12 @@ def main() -> None:
                 max_gap_seconds=args.max_gap_seconds,
                 test_stride=args.test_window_stride,
                 eval_mode=args.eval_mode,
+                eval_splits=list(args.splits),
                 target_smoothing_window=args.target_smoothing_window,
                 skip_missing_finetuned=args.allow_missing_finetuned or args.base_only,
                 base_only=args.base_only,
                 finetuned_dir=args.finetuned_dir,
+                base_checkpoint=args.base_checkpoint,
             )
             if row:
                 summaries.append(row)

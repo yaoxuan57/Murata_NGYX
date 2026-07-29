@@ -49,6 +49,71 @@ def _normalize_sensor_code(raw: object) -> str:
     return text
 
 
+def _sensor_name_column(df: pd.DataFrame) -> str:
+    for col in ("SENSOR_NAME", "SENSOR_DESC"):
+        if col in df.columns:
+            return col
+    raise ValueError(
+        "CSV needs SENSOR_NAME or SENSOR_DESC to build sensor_id_name_mapping.csv. "
+        f"Columns: {list(df.columns)}"
+    )
+
+
+def _sensor_code_column(df: pd.DataFrame) -> str:
+    for col in ("SENSOR_CODE", "STN_CODE"):
+        if col in df.columns:
+            return col
+    raise ValueError(
+        "CSV needs SENSOR_CODE or STN_CODE to build sensor_id_name_mapping.csv. "
+        f"Columns: {list(df.columns)}"
+    )
+
+
+def build_sensor_mapping_dataframe(source_csv: Path | str) -> pd.DataFrame:
+    """
+    Build a clean ``SENSOR_CODE`` / ``SENSOR_NAME`` table from a vibration export CSV.
+
+    One row per unique sensor name; code is taken from the export as-is (normalized hex).
+    """
+    path = Path(source_csv)
+    if not path.is_file():
+        raise FileNotFoundError(f"Source CSV not found: {path}")
+
+    df = pd.read_csv(path, low_memory=False)
+    name_col = _sensor_name_column(df)
+    code_col = _sensor_code_column(df)
+
+    work = df[[code_col, name_col]].copy()
+    work["SENSOR_CODE"] = work[code_col].map(_normalize_sensor_code)
+    work["SENSOR_NAME"] = work[name_col].astype(str).str.strip()
+    work = work[
+        (work["SENSOR_CODE"] != "")
+        & (work["SENSOR_NAME"] != "")
+        & (work["SENSOR_NAME"].str.lower() != "nan")
+    ]
+    if work.empty:
+        raise ValueError(f"No sensor code/name pairs found in {path}")
+
+    return (
+        work[["SENSOR_CODE", "SENSOR_NAME"]]
+        .drop_duplicates(subset=["SENSOR_NAME"], keep="first")
+        .sort_values("SENSOR_NAME", kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+
+def write_sensor_mapping_csv(
+    source_csv: Path | str,
+    out_path: Path | str | None = None,
+) -> Path:
+    """Write ``sensor_id_name_mapping.csv`` from unique sensors in *source_csv*."""
+    mapping_df = build_sensor_mapping_dataframe(source_csv)
+    out = Path(out_path) if out_path is not None else default_sensor_mapping_path()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    mapping_df.to_csv(out, index=False)
+    return out
+
+
 def load_sensor_mapping(mapping_csv: Path | str | None = None) -> Dict[str, Dict[str, str]]:
     """Return ``sensor_name -> {sensorId, sensorName}``."""
     path = Path(mapping_csv) if mapping_csv else default_sensor_mapping_path()
@@ -59,13 +124,14 @@ def load_sensor_mapping(mapping_csv: Path | str | None = None) -> Dict[str, Dict
         }
 
     df = pd.read_csv(path, dtype=str)
-    if "SENSOR_NAME" not in df.columns:
-        raise ValueError(f"{path} missing SENSOR_NAME column")
+    name_col = "SENSOR_NAME" if "SENSOR_NAME" in df.columns else "SENSOR_DESC"
+    if name_col not in df.columns:
+        raise ValueError(f"{path} missing SENSOR_NAME or SENSOR_DESC column")
 
     out: Dict[str, Dict[str, str]] = {}
     code_col = "SENSOR_CODE" if "SENSOR_CODE" in df.columns else None
-    for _, row in df.drop_duplicates(subset=["SENSOR_NAME"]).iterrows():
-        name = str(row["SENSOR_NAME"]).strip()
+    for _, row in df.drop_duplicates(subset=[name_col]).iterrows():
+        name = str(row[name_col]).strip()
         if not name:
             continue
         sid = SENSOR_ID_BY_NAME.get(name, "")
@@ -143,6 +209,110 @@ def resolve_sensor_info(
         "sensorName": candidate,
         "machineId": infer_machine_id(candidate),
     }
+
+
+def sensor_name_for_filename(sensor_name: str) -> str:
+    """``AHU 2-9 Blower DE A`` -> ``AHU_2-9_Blower_DE_A`` (spaces -> underscores)."""
+    return re.sub(r"\s+", "_", str(sensor_name).strip())
+
+
+def deployment_bundle_basename(
+    model_type: str,
+    sensor_id: str,
+    sensor_name: str,
+) -> str:
+    """``modelType__sensorID__sensorName`` for batch-upload pairing."""
+    mt = str(model_type or "rms_forecast").strip()
+    sid = str(sensor_id or "").strip().upper()
+    sname = sensor_name_for_filename(sensor_name)
+    if not sid or not sname:
+        raise ValueError(f"deployment bundle requires sensorId and sensorName, got {sid!r} {sname!r}")
+    return f"{mt}__{sid}__{sname}"
+
+
+def deployment_model_filename(
+    model_type: str,
+    sensor_id: str,
+    sensor_name: str,
+    *,
+    extension: str = ".pth",
+) -> str:
+    ext = extension if extension.startswith(".") else f".{extension}"
+    return f"{deployment_bundle_basename(model_type, sensor_id, sensor_name)}{ext}"
+
+
+def deployment_metadata_filename(
+    model_type: str,
+    sensor_id: str,
+    sensor_name: str,
+) -> str:
+    return f"{deployment_bundle_basename(model_type, sensor_id, sensor_name)}.metadata.json"
+
+
+def parse_deployment_filename(filename: str) -> Dict[str, str] | None:
+    """
+    Parse ``modelType__sensorID__sensorName`` from a model or metadata filename.
+
+    Supports ``.pth``, ``.joblib``, and ``.metadata.json`` suffixes.
+    """
+    name = Path(filename).name
+    for suffix in (".metadata.json", ".pth", ".joblib"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    parts = name.split("__")
+    if len(parts) < 3:
+        return None
+    model_type, sensor_id, sensor_name_part = parts[0], parts[1], "__".join(parts[2:])
+    if not model_type or not sensor_id or not sensor_name_part:
+        return None
+    return {
+        "modelType": model_type,
+        "sensorId": sensor_id.upper(),
+        "sensorName": sensor_name_part.replace("_", " "),
+        "sensorNameFile": sensor_name_part,
+        "basename": name,
+    }
+
+
+def discover_deployment_model_pairs(models_dir: str | Path) -> Dict[str, Dict[str, Any]]:
+    """
+    Pair batch-uploaded model + metadata files by ``modelType__sensorID__sensorName``.
+
+    Returns ``sensorId -> {modelPath, metadataPath, modelType, sensorName, basename}``.
+    """
+    root = Path(models_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Models directory not found: {root}")
+
+    models: Dict[str, Dict[str, Any]] = {}
+    metas: Dict[str, Dict[str, Any]] = {}
+
+    for path in sorted(root.iterdir()):
+        if not path.is_file():
+            continue
+        parsed = parse_deployment_filename(path.name)
+        if parsed is None:
+            continue
+        key = parsed["basename"]
+        if path.name.endswith(".metadata.json"):
+            metas[key] = {**parsed, "metadataPath": str(path.resolve())}
+        elif path.suffix.lower() in {".pth", ".joblib"}:
+            models[key] = {**parsed, "modelPath": str(path.resolve())}
+
+    paired: Dict[str, Dict[str, Any]] = {}
+    for key, model in models.items():
+        meta = metas.get(key)
+        sensor_id = model["sensorId"]
+        entry = {
+            **model,
+            "metadataPath": meta["metadataPath"] if meta else None,
+            "basename": key,
+        }
+        if sensor_id in paired:
+            raise ValueError(f"Duplicate deployment model for sensorId={sensor_id!r} in {root}")
+        paired[sensor_id] = entry
+    return paired
 
 
 def build_model_name(sensor_id: str, sensor_name: str = "", version: str = "v1") -> str:
@@ -255,7 +425,7 @@ def save_model_meta_json(
     mapping_csv: str | Path | None = None,
     meta_path: str | Path | None = None,
 ) -> Path:
-    """Write ``<checkpoint_stem>_meta.json`` beside the ``.pth`` file."""
+    """Write ``modelType__sensorID__sensorName.metadata.json`` beside the ``.pth`` file."""
     checkpoint_path = Path(checkpoint_path)
     if data_source_path is None:
         data_source_path = (
@@ -273,7 +443,22 @@ def save_model_meta_json(
         mapping_csv=mapping_csv,
     )
 
-    if meta_path is None:
+    out_dir = checkpoint_path.parent
+    sensor_id = str(payload.get("sensorId") or "").strip()
+    sensor_name = str(payload.get("sensorName") or "").strip()
+    model_type = str(payload.get("modelType") or "rms_forecast").strip()
+
+    if meta_path is None and sensor_id and sensor_name:
+        std_meta_name = deployment_metadata_filename(model_type, sensor_id, sensor_name)
+        std_model_name = deployment_model_filename(model_type, sensor_id, sensor_name)
+        meta_path = out_dir / std_meta_name
+        payload["checkpointFile"] = std_model_name
+        std_checkpoint = out_dir / std_model_name
+        if checkpoint_path.resolve() != std_checkpoint.resolve():
+            if std_checkpoint.exists():
+                std_checkpoint.unlink()
+            checkpoint_path.rename(std_checkpoint)
+    elif meta_path is None:
         meta_path = checkpoint_path.with_name(f"{checkpoint_path.stem}_meta.json")
     else:
         meta_path = Path(meta_path)

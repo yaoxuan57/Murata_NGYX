@@ -24,6 +24,28 @@ def _parse_optional_gap_seconds(value) -> Optional[float]:
     return float(value)
 
 
+def compute_training_value_range(
+    values: np.ndarray,
+    *,
+    value_column: str,
+    smoothed: bool,
+) -> Dict[str, float | int | str | bool]:
+    """Percentile band for the train-split target values used during training."""
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {}
+    return {
+        "value_column": str(value_column),
+        "smoothed": bool(smoothed),
+        "p05": float(np.percentile(arr, 5)),
+        "p10": float(np.percentile(arr, 10)),
+        "p90": float(np.percentile(arr, 90)),
+        "p95": float(np.percentile(arr, 95)),
+        "n_train_values": int(arr.size),
+    }
+
+
 def add_common_args(parser, default_output_dir: str, default_checkpoint_name: str):
     parser.add_argument(
         "--train-csv",
@@ -290,7 +312,10 @@ def add_common_args(parser, default_output_dir: str, default_checkpoint_name: st
         "--no-model-meta-json",
         dest="write_model_meta_json",
         action="store_false",
-        help="Skip writing <checkpoint_stem>_meta.json beside the .pth file.",
+        help=(
+            "Skip writing modelType__sensorID__sensorName.metadata.json and renaming "
+            "the checkpoint to modelType__sensorID__sensorName.pth."
+        ),
     )
     parser.set_defaults(write_model_meta_json=True)
     return parser
@@ -1950,6 +1975,11 @@ def run_sweep(
         test_target_norm = (test_series - train_mean) / train_std
         print(f"train_mean: {train_mean:.6f}")
         print(f"train_std : {train_std:.6f}")
+        training_value_range = compute_training_value_range(
+            train_series[row_tr],
+            value_column=vc,
+            smoothed=tw_pre > 1,
+        )
     elif explicit_tv:
         train_series = df_train[vc].to_numpy(dtype=np.float32)
         val_series = df_val[vc].to_numpy(dtype=np.float32)
@@ -2063,6 +2093,7 @@ def run_sweep(
     if single_file_mode:
         train_mean = float("nan")
         train_std = float("nan")
+        training_value_range = None
     elif manifest_mode:
         pass
     elif explicit_tv:
@@ -2078,6 +2109,11 @@ def run_sweep(
         test_target_norm = (test_series - train_mean) / train_std
         print(f"train_mean: {train_mean:.6f}")
         print(f"train_std : {train_std:.6f}")
+        training_value_range = compute_training_value_range(
+            train_series,
+            value_column=vc,
+            smoothed=tw_pre > 1,
+        )
     else:
         train_end_idx = int(len(tv_series) * (1 - args.val_ratio))
         train_mean = tv_series[:train_end_idx].mean()
@@ -2092,6 +2128,11 @@ def run_sweep(
         train_feat_norm = val_feat_norm = train_target_norm = val_target_norm = None
         print(f"train_mean: {train_mean:.6f}")
         print(f"train_std : {train_std:.6f}")
+        training_value_range = compute_training_value_range(
+            tv_series[:train_end_idx],
+            value_column=vc,
+            smoothed=tw_pre > 1,
+        )
 
     experiment_results = []
 
@@ -2163,6 +2204,11 @@ def run_sweep(
                     row_tr = row_indices_covered_by_windows(train_starts_arr, span, T)
                     train_mean = float(np.mean(full_series[row_tr]))
                     train_std = float(np.std(full_series[row_tr])) + 1e-8
+                    training_value_range = compute_training_value_range(
+                        full_series[row_tr],
+                        value_column=vc,
+                        smoothed=tw_pre > 1,
+                    )
                     feat_mean = np.mean(full_features[row_tr], axis=0)
                     feat_std = np.std(full_features[row_tr], axis=0) + 1e-8
                     feat_norm_all = (full_features - feat_mean) / feat_std
@@ -2644,6 +2690,9 @@ def run_sweep(
                         "test_sample_starts": np.asarray(test_dataset.sample_starts, dtype=np.int64).copy(),
                         "train_mean": float(train_mean),
                         "train_std": float(train_std),
+                        "training_value_range": copy.deepcopy(training_value_range)
+                        if training_value_range
+                        else None,
                     }
                 )
             except ValueError as exc:
@@ -2705,6 +2754,7 @@ def run_sweep(
         "best_val_window_rmse": float(best_result["best_val_window_rmse"]),
         "train_mean": float(best_result["train_mean"]),
         "train_std": float(best_result["train_std"]),
+        "training_value_range": best_result.get("training_value_range"),
         "input_len": int(best_input_len),
         "pred_len": int(best_pred_len),
         "model_config": model_config_factory(args, best_input_len, best_pred_len),
@@ -2712,6 +2762,14 @@ def run_sweep(
     }
     torch.save(best_checkpoint, checkpoint_path)
     print(f"Saved best model to: {checkpoint_path}")
+    _tvr = best_result.get("training_value_range") or {}
+    if _tvr:
+        print(
+            f"Training value range ({'smoothed' if _tvr.get('smoothed') else 'raw'} "
+            f"{_tvr.get('value_column', 'target')}): "
+            f"p05={_tvr.get('p05'):.4f}, p10={_tvr.get('p10'):.4f}, "
+            f"p90={_tvr.get('p90'):.4f}, p95={_tvr.get('p95'):.4f}"
+        )
 
     history_path = os.path.join(args.output_dir, "best_history.csv")
     best_result["history"].to_csv(history_path, index=False)
@@ -2728,6 +2786,7 @@ def run_sweep(
         "baseline_rmse": float(best_result["baseline_rmse"]),
         "train_mean": float(best_result["train_mean"]),
         "train_std": float(best_result["train_std"]),
+        "training_value_range": best_result.get("training_value_range"),
         "horizon_composite_loss": [
             float(x) if np.isfinite(x) else None for x in best_result["horizon_composite"]
         ],
@@ -2851,6 +2910,7 @@ def run_sweep(
             for (a, b), m in zip(best_result["horizon_phase_h_ranges"], best_result["horizon_phase_composite"])
         ],
         "forecast_quantiles": best_result.get("forecast_quantiles"),
+        "training_value_range": best_result.get("training_value_range"),
     }
     with open(best_config_path, "w", encoding="utf-8") as fp:
         json.dump(best_config_payload, fp, indent=2)

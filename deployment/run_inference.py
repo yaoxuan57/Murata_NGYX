@@ -3,8 +3,9 @@
 Run vibration forecasts: rolling 48-point input windows -> 48-step forecasts.
 
 Routing (colleague-owned):
-  CSV SENSOR_CODE -> look up in a mapping dictionary {sensorId: modelFilePath}
-  -> load that .pth -> forecast.
+  Batch-upload modelType__sensorID__sensorName.pth + .metadata.json under models/
+  (paired by filename), or optional sensor_model_map.json {sensorId: path}.
+  CSV SENSOR_CODE -> model path -> forecast.
 
   cd deployment
   python run_inference.py --no-plot
@@ -27,6 +28,7 @@ from inference import (  # noqa: E402
 )
 from io_utils import read_vibration_export_csv  # noqa: E402
 from sensors import (  # noqa: E402
+    build_path_map_from_models_dir,
     build_sensor_model_map_from_path_dict,
     load_sensor_path_map,
 )
@@ -40,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     default_input = DEPLOY_ROOT / "data" / "Jun.csv"
     default_output = DEPLOY_ROOT / "output" / "predictions_June.json"
     default_model_map = DEPLOY_ROOT / "sensor_model_map.json"
+    default_models_dir = DEPLOY_ROOT / "models"
     default_plots = DEPLOY_ROOT / "output" / "plots"
 
     parser = argparse.ArgumentParser(
@@ -58,10 +61,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-map",
         type=Path,
-        default=default_model_map,
+        default=None,
         help=(
-            "JSON dictionary mapping sensorId -> model .pth path "
-            f"(default: {default_model_map})"
+            "Optional JSON mapping sensorId -> model .pth path. "
+            "When omitted, models are paired by filename under --models-dir."
+        ),
+    )
+    parser.add_argument(
+        "--models-dir",
+        type=Path,
+        default=default_models_dir,
+        help=(
+            "Directory of batch-uploaded model bundles "
+            "(modelType__sensorID__sensorName.pth + .metadata.json). "
+            f"Default: {default_models_dir}"
         ),
     )
     parser.add_argument(
@@ -169,26 +182,48 @@ def main() -> None:
 
     if not args.input.is_file():
         raise SystemExit(f"Input CSV not found: {args.input}")
-    if not args.model_map.is_file():
-        raise SystemExit(f"Model path map not found: {args.model_map}")
 
     device = args.device
     if device == "cuda" and not __import__("torch").cuda.is_available():
         print("CUDA not available; using CPU.")
         device = "cpu"
 
-    # Route via colleague dictionary:
-    #   CSV SENSOR_CODE -> model_map[sensorId] -> .pth path
+    # Route via colleague dictionary or batch-upload filename pairing:
+    #   CSV SENSOR_CODE -> model path -> .pth
     vib_df = read_vibration_export_csv(str(args.input))
-    path_map = load_sensor_path_map(args.model_map)
+
+    path_map: dict[str, str] = {}
+    routing_source = ""
+
+    if args.models_dir.is_dir():
+        discovered = build_path_map_from_models_dir(args.models_dir)
+        if discovered:
+            path_map.update(discovered)
+            routing_source = f"models-dir {args.models_dir}"
+
+    model_map_path = args.model_map if args.model_map is not None else DEPLOY_ROOT / "sensor_model_map.json"
+    if model_map_path.is_file():
+        manual = load_sensor_path_map(model_map_path)
+        path_map.update(manual)
+        routing_source = (
+            f"{routing_source} + {model_map_path}" if routing_source else str(model_map_path)
+        )
+
+    if not path_map:
+        raise SystemExit(
+            "No models found. Batch-upload "
+            "modelType__sensorID__sensorName.pth + .metadata.json under "
+            f"{args.models_dir}, or provide --model-map."
+        )
+
     vibration_sensor_model_map, routing = build_sensor_model_map_from_path_dict(
         path_map,
         vib_df,
         base_dir=args.models_base,
     )
+    print(f"Model routing ({routing_source or 'path map'}):")
     print(
-        f"Model routing via {routing['codeColumn']} + path map: "
-        f"{len(routing['uniqueInputCodes'])} unique CSV code(s), "
+        f"  {routing['codeColumn']}: {len(routing['uniqueInputCodes'])} unique CSV code(s), "
         f"{len(routing['matchedSensorIds'])} model(s) matched."
     )
     print(f"  Matched sensorId(s): {routing['matchedSensorIds']}")

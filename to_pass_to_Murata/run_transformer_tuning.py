@@ -1,46 +1,69 @@
 #!/usr/bin/env python3
 """Portable replacement for run_transformer_tuning.sbatch (no Slurm required).
 
-Runs the full transformer tuning pipeline:
+Runs the transformer tuning pipeline:
   1. Optional chronological CSV split
-  2. Train candidate config(s) with window plots + quantile bands
-  3. Rank runs and pick the best
-  4. Re-run the best config into best_model/
-  5. Rank best_model/ outputs
+  2. Generate sensor_id_name_mapping.csv from unique sensors in the input CSV
+  3. Train candidate config(s) with window plots + quantile bands
+  4. Rank runs and pick the best under ``runs/``
 
-Example (default: split data/AHU_2_9_Blower_DE_A.csv then train):
-  python run_transformer_tuning.py
+All artifacts live under ``<output-root>/runs/`` (no separate ``best_model/`` copy).
+
+Example:
+  python run_transformer_tuning.py --split-source-csv data/AHU_2_9_Blower_DE_A_30_min.csv
 
 Example (pre-split files):
   python run_transformer_tuning.py \\
-    --split-source-csv "" \\
     --train-csv data/splits/my_run/train.csv \\
     --val-csv data/splits/my_run/val.csv \\
     --test-csv data/splits/my_run/test.csv
-
-Example (quick smoke test on CPU):
-  python run_transformer_tuning.py --epochs 5 --split-source-csv data/AHU_2_9_Blower_DE_A.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 
+from model_meta import default_sensor_mapping_path, write_sensor_mapping_csv  # noqa: E402
+
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 TRAIN_SCRIPT = SCRIPT_DIR / "train_transformer_sweep.py"
 SPLIT_SCRIPT = SCRIPT_DIR / "split_csv_chronological_train_val_test.py"
 SELECT_SCRIPT = SCRIPT_DIR / "select_best_sweep_run.py"
-RERUN_SCRIPT = SCRIPT_DIR / "rerun_best_sweep_with_plots.py"
 
 
 def _run(cmd: list[str], *, cwd: Path | None = None) -> None:
     print("\n>>", " ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True, cwd=str(cwd or SCRIPT_DIR))
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    run_cmd = list(cmd)
+    exe_name = Path(str(run_cmd[0])).name.lower() if run_cmd else ""
+    if exe_name.startswith("python") and "-u" not in run_cmd:
+        run_cmd.insert(1, "-u")
+    process = subprocess.Popen(
+        run_cmd,
+        cwd=str(cwd or SCRIPT_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+    rc = process.wait()
+    if rc != 0:
+        raise subprocess.CalledProcessError(rc, cmd)
 
 
 def _parse_input_features(text: str | None) -> list[str]:
@@ -51,10 +74,9 @@ def _parse_input_features(text: str | None) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run transformer tuning pipeline (split → train → select → rerun → select)."
+        description="Run transformer tuning pipeline (split → train → rank under runs/)."
     )
 
-    # --- Data ---
     data = p.add_argument_group("data")
     data.add_argument(
         "--split-source-csv",
@@ -75,7 +97,6 @@ def parse_args() -> argparse.Namespace:
     data.add_argument("--val-ratio", type=float, default=0.10)
     data.add_argument("--test-ratio", type=float, default=None)
 
-    # --- Target / features ---
     feat = p.add_argument_group("target and features")
     feat.add_argument("--value-column", type=str, default="Acceleration RMS")
     feat.add_argument(
@@ -96,13 +117,13 @@ def parse_args() -> argparse.Namespace:
         help="Causal trailing MA on value column per CSV before windowing (1 = off).",
     )
 
-    # --- Window / timestamp rules ---
     win = p.add_argument_group("window rules")
     win.add_argument(
         "--require-uniform-timestep",
         dest="require_uniform_timestep",
         action="store_true",
-        default=True,
+        default=False,
+        help="Drop windows whose consecutive TIMESTAMP steps are not ~30 min apart.",
     )
     win.add_argument("--no-require-uniform-timestep", dest="require_uniform_timestep", action="store_false")
     win.add_argument("--uniform-step-seconds", type=float, default=1800.0)
@@ -110,11 +131,10 @@ def parse_args() -> argparse.Namespace:
     win.add_argument(
         "--max-consecutive-timestamp-gap-seconds",
         type=float,
-        default=1860.0,
-        help="Max allowed Δt between consecutive rows inside a window. Use 0 to disable.",
+        default=0.0,
+        help="Max allowed gap between consecutive rows inside a window (seconds). 0 = disable.",
     )
 
-    # --- Training ---
     train = p.add_argument_group("training")
     train.add_argument("--epochs", type=int, default=5)
     train.add_argument("--batch-size", type=int, default=16)
@@ -129,8 +149,14 @@ def parse_args() -> argparse.Namespace:
     train.add_argument("--train-window-stride", type=int, default=1)
     train.add_argument("--val-window-stride", type=int, default=0)
     train.add_argument("--test-window-stride", type=int, default=0)
+    train.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=("auto", "cpu", "cuda"),
+        help="Training device passed to train_transformer_sweep.py (auto = cuda if available).",
+    )
 
-    # --- Loss weights ---
     loss = p.add_argument_group("loss weights")
     loss.add_argument("--loss-point-weight", type=float, default=0.7)
     loss.add_argument("--loss-diff-weight", type=float, default=0.9)
@@ -138,7 +164,6 @@ def parse_args() -> argparse.Namespace:
     loss.add_argument("--loss-variance-weight", type=float, default=0.2)
     loss.add_argument("--loss-tail-weight", type=float, default=1.0)
 
-    # --- Quantiles / plots ---
     plots = p.add_argument_group("quantiles and plots")
     plots.add_argument(
         "--enable-forecast-quantiles",
@@ -156,7 +181,6 @@ def parse_args() -> argparse.Namespace:
     plots.add_argument("--no-stitched-test-html", dest="save_stitched_test_html", action="store_false")
     plots.add_argument("--rolling-window-artifact-limit", type=int, default=None)
 
-    # --- Output ---
     out = p.add_argument_group("output")
     out.add_argument(
         "--output-root",
@@ -176,32 +200,33 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Subfolder name under runs/. Default: cfg_48_k11_lr5e4_wd<weight-decay>.",
     )
-    out.add_argument(
-        "--skip-rerun",
-        action="store_true",
-        help="Stop after sweep + ranking (skip best-model rerun step).",
-    )
 
     meta = p.add_argument_group("model metadata")
     meta.add_argument(
         "--model-version",
         type=str,
         default="v1",
-        help="Version tag for <checkpoint>_meta.json modelName (e.g. v1).",
+        help="Version tag for model metadata modelName (legacy; modelName is {sensorId}_rms_forecast).",
     )
     meta.add_argument(
         "--sensor-mapping-csv",
         type=str,
         default=None,
-        help="SENSOR_CODE/SENSOR_NAME mapping CSV (default: data/sensor_id_name_mapping.csv).",
+        help="Output path for generated sensor_id_name_mapping.csv (default: data/sensor_id_name_mapping.csv).",
+    )
+    meta.add_argument(
+        "--no-generate-sensor-mapping",
+        dest="generate_sensor_mapping",
+        action="store_false",
+        help="Do not rebuild sensor_id_name_mapping.csv from the input CSV before training.",
     )
     meta.add_argument(
         "--no-model-meta-json",
         dest="write_model_meta_json",
         action="store_false",
-        help="Skip writing model metadata JSON beside each .pth checkpoint.",
+        help="Skip writing modelType__sensorID__sensorName.metadata.json beside each .pth checkpoint.",
     )
-    p.set_defaults(write_model_meta_json=True)
+    p.set_defaults(write_model_meta_json=True, generate_sensor_mapping=True)
 
     return p.parse_args()
 
@@ -214,47 +239,13 @@ class DataConfig:
         data_flags: list[str],
         data_tag: str,
         ref_parent: Path,
-        train_csv: str | None = None,
-        val_csv: str | None = None,
-        test_csv: str | None = None,
-        single_csv: str | None = None,
-        train_ratio: float | None = None,
-        val_ratio: float | None = None,
-        test_ratio: float | None = None,
+        mapping_source_csv: Path | None = None,
     ):
         self.mode = mode
         self.data_flags = data_flags
         self.data_tag = data_tag
         self.ref_parent = ref_parent
-        self.train_csv = train_csv
-        self.val_csv = val_csv
-        self.test_csv = test_csv
-        self.single_csv = single_csv
-        self.train_ratio = train_ratio
-        self.val_ratio = val_ratio
-        self.test_ratio = test_ratio
-
-    def rerun_data_flags(self) -> list[str]:
-        if self.mode == "single":
-            flags = [
-                "--single-csv",
-                self.single_csv,
-                "--train-ratio",
-                str(self.train_ratio),
-                "--val-ratio",
-                str(self.val_ratio),
-            ]
-            if self.test_ratio is not None:
-                flags.extend(["--test-ratio", str(self.test_ratio)])
-            return flags
-        return [
-            "--train-csv",
-            self.train_csv,
-            "--val-csv",
-            self.val_csv,
-            "--test-csv",
-            self.test_csv,
-        ]
+        self.mapping_source_csv = mapping_source_csv
 
 
 def _resolve_data_paths(args: argparse.Namespace) -> DataConfig:
@@ -265,9 +256,9 @@ def _resolve_data_paths(args: argparse.Namespace) -> DataConfig:
     split_out_dir = args.split_out_dir
 
     if train_csv and val_csv and test_csv:
-        pass  # explicit three-file split — use as-is
+        pass
     elif single_csv:
-        pass  # handled below
+        pass
     elif split_out_dir:
         split_path = Path(split_out_dir)
         if not split_path.is_absolute():
@@ -322,17 +313,18 @@ def _resolve_data_paths(args: argparse.Namespace) -> DataConfig:
         val_csv = str(split_path / "val.csv")
         test_csv = str(split_path / "test.csv")
         single_csv = None
+        mapping_source = src
 
     if train_csv and val_csv and test_csv:
         ref_parent = Path(train_csv).resolve().parent
+        if "mapping_source" not in locals():
+            mapping_source = Path(train_csv).resolve()
         return DataConfig(
             mode="explicit",
             data_flags=["--train-csv", train_csv, "--val-csv", val_csv, "--test-csv", test_csv],
             data_tag=f"chrono_{ref_parent.name}",
             ref_parent=ref_parent,
-            train_csv=train_csv,
-            val_csv=val_csv,
-            test_csv=test_csv,
+            mapping_source_csv=Path(mapping_source).resolve(),
         )
     if single_csv:
         sc = Path(single_csv)
@@ -355,10 +347,7 @@ def _resolve_data_paths(args: argparse.Namespace) -> DataConfig:
             data_flags=data_flags,
             data_tag=f"{sc.stem}_single_r{args.train_ratio}_v{args.val_ratio}",
             ref_parent=sc.parent,
-            single_csv=str(sc),
-            train_ratio=args.train_ratio,
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio,
+            mapping_source_csv=sc.resolve(),
         )
 
     raise SystemExit(
@@ -367,13 +356,33 @@ def _resolve_data_paths(args: argparse.Namespace) -> DataConfig:
     )
 
 
-def _meta_flags(args: argparse.Namespace) -> list[str]:
+def _meta_flags(args: argparse.Namespace, *, mapping_csv: Path | None = None) -> list[str]:
     if not getattr(args, "write_model_meta_json", True):
         return ["--no-model-meta-json"]
     flags = ["--model-version", str(args.model_version)]
-    if args.sensor_mapping_csv:
-        flags.extend(["--sensor-mapping-csv", str(args.sensor_mapping_csv)])
+    path = mapping_csv
+    if path is None and args.sensor_mapping_csv:
+        path = Path(args.sensor_mapping_csv)
+        if not path.is_absolute():
+            path = SCRIPT_DIR / path
+    if path is not None:
+        flags.extend(["--sensor-mapping-csv", str(path)])
     return flags
+
+
+def _maybe_generate_sensor_mapping(args: argparse.Namespace, data: DataConfig) -> Path | None:
+    if not getattr(args, "generate_sensor_mapping", True):
+        return None
+    if data.mapping_source_csv is None or not data.mapping_source_csv.is_file():
+        print("Skipping sensor mapping generation (no source CSV).")
+        return None
+
+    out = Path(args.sensor_mapping_csv) if args.sensor_mapping_csv else default_sensor_mapping_path()
+    if not out.is_absolute():
+        out = SCRIPT_DIR / out
+    written = write_sensor_mapping_csv(data.mapping_source_csv, out)
+    print(f"Generated sensor mapping from {data.mapping_source_csv.name} -> {written}")
+    return written
 
 
 def _feature_flags(args: argparse.Namespace) -> list[str]:
@@ -439,6 +448,8 @@ def _common_train_flags(args: argparse.Namespace) -> list[str]:
         str(args.val_window_stride),
         "--test-window-stride",
         str(args.test_window_stride),
+        "--device",
+        str(args.device),
         "--max-consecutive-timestamp-gap-seconds",
         str(args.max_consecutive_timestamp_gap_seconds),
         *_uniform_flags(args),
@@ -473,30 +484,45 @@ def _output_root(args: argparse.Namespace, ref_parent: Path, data_tag: str) -> P
     return SCRIPT_DIR / f"outputs_transformer_tuning{suffix}_{data_tag}{job_suffix}"
 
 
+def _best_run_dir(runs: Path) -> Path | None:
+    selection_path = runs / "best_run_selection.json"
+    if not selection_path.is_file():
+        return None
+    payload = json.loads(selection_path.read_text(encoding="utf-8"))
+    run_dir = payload.get("run_dir") or payload.get("best_run_dir")
+    if run_dir:
+        return Path(run_dir)
+    run_name = payload.get("run_name") or payload.get("best_run")
+    if run_name:
+        candidate = runs / str(run_name)
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def main() -> None:
     args = parse_args()
     os.chdir(SCRIPT_DIR)
     print(f"Using project dir: {SCRIPT_DIR}")
 
-    for script in (TRAIN_SCRIPT, SPLIT_SCRIPT, SELECT_SCRIPT, RERUN_SCRIPT):
+    for script in (TRAIN_SCRIPT, SPLIT_SCRIPT, SELECT_SCRIPT):
         if not script.is_file():
             raise FileNotFoundError(f"Missing required script: {script}")
 
     data = _resolve_data_paths(args)
+    mapping_csv = _maybe_generate_sensor_mapping(args, data)
     feature_flags = _feature_flags(args)
     quant_flags = _quantile_flags(args)
     stitch_flags = _stitch_flags(args)
     rolling_flags = _rolling_flags(args)
     target_smooth_flags = _target_smooth_flags(args)
-    meta_flags = _meta_flags(args)
+    meta_flags = _meta_flags(args, mapping_csv=mapping_csv)
     common_train = _common_train_flags(args)
     common_loss = _common_loss_flags(args)
 
     root = _output_root(args, data.ref_parent, data.data_tag)
     runs = root / "runs"
-    best = root / "best_model"
     runs.mkdir(parents=True, exist_ok=True)
-    best.mkdir(parents=True, exist_ok=True)
 
     sweep_run_tag = args.sweep_run_tag or f"cfg_48_k11_lr5e4_wd{args.weight_decay}"
     sweep_out = runs / sweep_run_tag
@@ -506,7 +532,6 @@ def main() -> None:
     print(f"Stitched test HTML: {'on' if args.save_stitched_test_html else 'off'}")
     print(f"AdamW weight decay: {args.weight_decay}")
 
-    # 1) Train candidate config(s)
     train_cmd = [
         sys.executable,
         "-u",
@@ -534,7 +559,6 @@ def main() -> None:
     ]
     _run(train_cmd)
 
-    # 2) Rank sweep runs
     _run(
         [
             sys.executable,
@@ -547,59 +571,19 @@ def main() -> None:
         ]
     )
 
-    if args.skip_rerun:
-        print("\nSkipping best-model rerun (--skip-rerun).")
-        print(f"Sweep output: {sweep_out}")
-        if args.save_stitched_test_html:
-            print(f"Stitched HTML: {sweep_out / 'rolling_window_forecasts' / 'stitched_test_forecast.html'}")
-        return
-
-    # 3) Re-run best config with plots
-    rerun_cmd = [
-        sys.executable,
-        "-u",
-        str(RERUN_SCRIPT),
-        "--selection-json",
-        str(runs / "best_run_selection.json"),
-        "--train-script",
-        str(TRAIN_SCRIPT),
-        "--output-root",
-        str(best),
-        *data.rerun_data_flags(),
-        "--value-column",
-        args.value_column,
-        *feature_flags,
-        *stitch_flags,
-        *rolling_flags,
-        *quant_flags,
-        *common_train,
-        *common_loss,
-        *meta_flags,
-        "--target-smoothing-window",
-        str(args.target_smoothing_window),
-    ]
-    _run(rerun_cmd)
-
-    # 4) Rank best_model runs
-    _run(
-        [
-            sys.executable,
-            "-u",
-            str(SELECT_SCRIPT),
-            "--runs-root",
-            str(best),
-            "--out-json",
-            "best_model_selection.json",
-        ]
-    )
-
+    best_run = _best_run_dir(runs) or sweep_out
     print("\nTransformer tuning completed.")
+    print(f"Runs root:          {runs}")
     print(f"Candidates ranking: {runs / 'sweep_run_ranking.csv'}")
     print(f"Best selection:     {runs / 'best_run_selection.json'}")
-    print(f"Sweep plots:        {sweep_out / 'rolling_window_forecasts' / 'plots'}")
+    print(f"Best run dir:       {best_run}")
+    print(f"Sweep plots:        {best_run / 'rolling_window_forecasts' / 'plots'}")
     if args.save_stitched_test_html:
-        print(f"Stitched HTML:      {sweep_out / 'rolling_window_forecasts' / 'stitched_test_forecast.html'}")
-    print(f"Best model root:    {best}")
+        print(f"Stitched HTML:      {best_run / 'rolling_window_forecasts' / 'stitched_test_forecast.html'}")
+    for label in ("rms_forecast__*.pth", "rms_forecast__*.metadata.json"):
+        matches = sorted(best_run.glob(label))
+        for path in matches:
+            print(f"Deployment bundle:  {path.name}")
 
 
 if __name__ == "__main__":

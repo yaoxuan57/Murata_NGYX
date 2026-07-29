@@ -356,7 +356,11 @@ def _inference_body_for_sensor(
             f"Internal error: context length {context_smooth.shape[0]} != expected {input_len}.",
         )
 
-    range_check = check_context_against_training_range(canon, context_smooth)
+    range_check = check_context_against_training_range(
+        canon,
+        context_smooth,
+        training_value_range=ckpt.get("training_value_range"),
+    )
     if range_check is not None and not range_check["in_training_range"]:
         warnings.warn(str(range_check["warning"]), UserWarning, stacklevel=2)
 

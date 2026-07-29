@@ -455,7 +455,7 @@ def load_actual_values_at_times(
     tolerance_minutes: float = 20.0,
 ) -> pd.Series:
     """Causal-smoothed RMS from *csv_path* aligned to each timestamp in *target_ts*."""
-    from io_utils import read_vibration_export_csv
+    from io_utils import parse_timestamp_series, read_vibration_export_csv
     from model_utils import smooth_target_series_1d
     from windowing import VALUE_COLUMN
 
@@ -467,7 +467,7 @@ def load_actual_values_at_times(
     if part.empty:
         return pd.Series(np.nan, index=np.arange(len(targets)), dtype=float)
 
-    ts = pd.to_datetime(part["TIMESTAMP"])
+    ts = parse_timestamp_series(part["TIMESTAMP"], name="TIMESTAMP", strict=False)
     valid = ts.notna()
     part = part.loc[valid].copy()
     part["_ts"] = ts.loc[valid].values
@@ -498,7 +498,7 @@ def load_actual_series_in_forecast_range(
     smooth_window: int = 48,
 ) -> Tuple[pd.Series, pd.Series]:
     """All causal-smoothed readings from CSV within [forecast_start, forecast_end]."""
-    from io_utils import read_vibration_export_csv
+    from io_utils import parse_timestamp_series, read_vibration_export_csv
     from model_utils import smooth_target_series_1d
     from windowing import VALUE_COLUMN
 
@@ -509,7 +509,7 @@ def load_actual_series_in_forecast_range(
     if part.empty:
         return pd.Series(dtype="datetime64[ns]"), pd.Series(dtype=float)
 
-    ts = pd.to_datetime(part["TIMESTAMP"])
+    ts = parse_timestamp_series(part["TIMESTAMP"], name="TIMESTAMP", strict=False)
     valid = ts.notna()
     part = part.loc[valid].copy()
     part["_ts"] = ts.loc[valid].values
@@ -537,7 +537,7 @@ def build_sensor_smoothed_timeline(
     Return (*part*, *timeline*) where *part* is the sorted sensor export rows and
     *timeline* has ``ts`` and ``value`` (causal-smoothed RMS) aligned row-for-row.
     """
-    from io_utils import read_vibration_export_csv
+    from io_utils import parse_timestamp_series, read_vibration_export_csv
     from model_utils import smooth_target_series_1d
     from windowing import VALUE_COLUMN
 
@@ -548,7 +548,7 @@ def build_sensor_smoothed_timeline(
     if part.empty:
         return part, pd.DataFrame(columns=["ts", "value"])
 
-    ts = pd.to_datetime(part["TIMESTAMP"])
+    ts = parse_timestamp_series(part["TIMESTAMP"], name="TIMESTAMP", strict=False)
     valid = ts.notna()
     part = part.loc[valid].copy()
     part["_ts"] = ts.loc[valid].values
@@ -735,12 +735,19 @@ def _render_input_forecast_actual_html(
         )
     )
 
-    forecast_start = pd.Timestamp(ctx_ts.iloc[-1])
+    forecast_start = pd.Timestamp(ctx_ts.iloc[-1]).to_pydatetime()
     fig.add_vline(
         x=forecast_start,
         line=dict(color="rgba(80,80,80,0.8)", width=1.4, dash="dot"),
-        annotation_text="forecast start",
-        annotation_position="top",
+    )
+    fig.add_annotation(
+        x=forecast_start,
+        y=1.0,
+        yref="paper",
+        text="forecast start",
+        showarrow=False,
+        yanchor="bottom",
+        font=dict(size=11, color="rgba(80,80,80,0.9)"),
     )
 
     if quantiles:
